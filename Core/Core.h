@@ -20,6 +20,13 @@
 
 #if __GNUC__
 #	include <wchar.h>
+#	include <stdint.h>
+#endif
+
+#ifdef TRACY_ENABLE
+#	undef max                     // defined somewhere in C headers, we'll redefine it below anyway
+#	define __PLACEMENT_NEW_INLINE // prevent inclusion of VC "operator new"
+#	include <tracy/Tracy.hpp>     // Include Tracy.hpp header
 #endif
 
 #include "Build.h"
@@ -149,10 +156,13 @@ typedef unsigned __int64		uint64;
 #	define FORMAT_SIZE(fmt)		"%z" fmt
 #	undef VSTUDIO_INTEGRATION
 #	undef WIN32_USE_SEH
-#	undef HAS_UI				// not yet supported on this platform
 
-typedef signed long long		int64;
-typedef unsigned long long		uint64;
+// Previous definitions:
+//   typedef signed long long		int64;
+//   typedef unsigned long long		uint64;
+// However this fails conversion from size_t to uint64 in gcc and clang, so we're new using standard types from 'stdint.h'
+typedef int64_t					int64;
+typedef uint64_t				uint64;
 
 #else
 
@@ -202,18 +212,6 @@ typedef size_t					address_t;
 #ifndef ROR32
 #define ROR32(val,shift)		( (unsigned(val) >> (shift)) | (unsigned(val) << (32-(shift))) )
 #endif
-
-
-#define COLOR_ESCAPE	'^'		// could be used for quick location of color-processing code
-
-#define S_BLACK			"^0"
-#define S_RED			"^1"
-#define S_GREEN			"^2"
-#define S_YELLOW		"^3"
-#define S_BLUE			"^4"
-#define S_MAGENTA		"^5"
-#define S_CYAN			"^6"
-#define S_WHITE			"^7"
 
 
 // Using size_t typecasts - that's platform integer type
@@ -291,9 +289,8 @@ inline void QSort(const char** array, int count, int (*cmpFunc)(const char**, co
 void appOpenLogFile(const char *filename);
 void appPrintf(const char *fmt, ...);
 
-extern bool GIsSwError;
-
-void appError(const char *fmt, ...);
+NORETURN void appError(const char *fmt, ...);
+#define appErrorNoLog(...) { GError.SuppressLog = true; appError(__VA_ARGS__); }
 
 
 // Log some information
@@ -342,10 +339,20 @@ unsigned appGetFileType(const char *filename);
 
 // Memory management
 
-void* appMalloc(int size, int alignment = 8);
+void* appMalloc(int size, int alignment = 8, bool noInit = false);
 void* appRealloc(void *ptr, int newSize);
+
+FORCEINLINE void* appMallocNoInit(int size, int alignment = 8)
+{
+	return appMalloc(size, alignment, true);
+}
+
 void appFree(void *ptr);
 
+#ifndef __APPLE__
+
+// C++ specs doesn't allow inlining of operator new/delete:  https://en.cppreference.com/w/cpp/memory/new/operator_new
+// All compilers are fine with that, except clang on macos. For this case we're providing "static" declaration deparately.
 
 FORCEINLINE void* operator new(size_t size)
 {
@@ -362,13 +369,16 @@ FORCEINLINE void operator delete(void* ptr)
 	appFree(ptr);
 }
 
-// C++17 (delete with alignment)
-FORCEINLINE void operator delete(void* ptr, size_t)
+FORCEINLINE void operator delete[](void* ptr)
 {
 	appFree(ptr);
 }
 
-FORCEINLINE void operator delete[](void* ptr)
+#endif // __APPLE__
+
+
+// C++17 (delete with alignment)
+FORCEINLINE void operator delete(void* ptr, size_t)
 {
 	appFree(ptr);
 }
@@ -507,7 +517,40 @@ long win32ExceptFilter(struct _EXCEPTION_POINTERS *info);
 void appUnwindPrefix(const char *fmt);		// not vararg (will display function name for unguardf only)
 NORETURN void appUnwindThrow(const char *fmt, ...);
 
-extern char GErrorHistory[2048];
+// The structure holding full error information, with reset capability.
+struct CErrorContext
+{
+	// Determines if this is an exception or appError throwed
+	bool IsSwError;
+	// Used for error history formatting
+	bool FmtNeedArrow;
+	// Suppress logging error message to a file (in a case of user mistake)
+	bool SuppressLog;
+	// Call stack
+	char History[2048];
+
+	CErrorContext()
+	{
+		Reset();
+	}
+
+	bool HasError() const
+	{
+		return History[0] != 0;
+	}
+
+	void Reset()
+	{
+		memset(this, 0, sizeof(*this));
+	}
+
+	// Log error message to console and notify.log, do NOT exit
+	void StandardHandler();
+
+	void LogHistory(const char *part);
+};
+
+extern CErrorContext GError;
 
 #else  // DO_GUARD
 
@@ -523,6 +566,45 @@ extern char GErrorHistory[2048];
 #define THROW			throw
 
 #endif // DO_GUARD
+
+#ifdef TRACY_ENABLE
+
+// Use guard macros to instrument code
+#undef guard
+#undef guardfunc
+#undef unguard
+#undef unguardf
+
+//#define guard(func)		{ ZoneScopedN(#func);
+#define guard(func)		{ ZoneNamedN(___tracy_scoped_zone, #func, bEnableProfiler);
+#define guardfunc		{ ZoneScoped;
+#define unguard			}
+#define unguardf(...)	}
+
+// Stuff for conditional profile samples
+namespace ProfilerInternal
+{
+	enum { bEnableProfiler = 1 };
+};
+using namespace ProfilerInternal;
+
+#define PROFILE_IF(cond) bool bEnableProfiler = cond;
+
+// Labelling the profile sample
+#define PROFILE_LABEL(text)			ZoneText(text, strlen(text))
+
+// Profiling memory allocations
+#define PROFILE_ALLOC(ptr, size)	TracyAllocS(ptr, size, 32)
+#define PROFILE_FREE(ptr)			TracyFree(ptr)
+
+#else
+
+#define PROFILE_IF(cond)
+#define PROFILE_LABEL(text)
+#define PROFILE_ALLOC(ptr, size)
+#define PROFILE_FREE(ptr)
+
+#endif // TRACY_ENABLE
 
 #if VSTUDIO_INTEGRATION
 extern bool GUseDebugger;
@@ -559,7 +641,7 @@ void appDumpStackTrace(const address_t* buffer, int depth);
 
 inline void appInitPlatform() {}
 
-inline int appCaptureStackTrace(address_t* buffer, int maxDepth, int framesToSkip) {}
+inline int appCaptureStackTrace(address_t* buffer, int maxDepth, int framesToSkip) { return 0; }
 inline void appDumpStackTrace(const address_t* buffer, int depth) {}
 
 #endif // _WIN32

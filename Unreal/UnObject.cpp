@@ -1,5 +1,6 @@
 #include "Core.h"
 #include "UnCore.h"
+#include "UE4Version.h"
 #include "UnObject.h"
 #include "UnPackage.h"
 
@@ -16,6 +17,8 @@
 /*-----------------------------------------------------------------------------
 	UObject class
 -----------------------------------------------------------------------------*/
+
+bool (*GBeforeLoadObjectCallback)(UObject*) = NULL;
 
 UObject::UObject()
 :	PackageIndex(INDEX_NONE)
@@ -75,7 +78,7 @@ void UObject::GetFullName(char *buf, int bufSize, bool IncludeObjectName, bool I
 	if (Package != NULL && Package->Game >= GAME_UE4_BASE)
 	{
 		// UE4 has full package path in its name, use it
-		appStrncpyz(buf, Package->Filename, bufSize);
+		appStrncpyz(buf, *Package->GetFilename(), bufSize);
 		char* s = strrchr(buf, '.');
 		if (!s)
 		{
@@ -161,11 +164,13 @@ void UObject::EndLoad()
 	{
 		UObject *Obj = GObjLoaded[0];
 		GObjLoaded.RemoveAt(0);
-		//!! should sort by packages + package offset
 		UnPackage *Package = Obj->Package;
+
 		guard(LoadObject);
+		PROFILE_LABEL(Obj->GetClassName());
+
 		Package->SetupReader(Obj->PackageIndex);
-		appPrintf("Loading %s %s from package %s\n", Obj->GetClassName(), Obj->Name, Package->Filename);
+		appPrintf("Loading %s %s from package %s\n", Obj->GetClassName(), Obj->Name, *Package->GetFilename());
 		// setup NotifyInfo to describe object
 		appSetNotifyHeader("Loading object %s'%s.%s'", Obj->GetClassName(), Package->Name, Obj->Name);
 #if PROFILE_LOADING
@@ -196,11 +201,12 @@ void UObject::EndLoad()
 			Package->ArVer, Package->ArLicenseeVer, UNVERS_STR, EDITOR_STR, GetGameTag(Package->Game));
 	}
 	// postload objects
-	int i;
-	guard(PostLoad);
-	for (i = 0; i < LoadedObjects.Num(); i++)
-		LoadedObjects[i]->PostLoad();
-	unguardf("%s", LoadedObjects[i]->Name);
+	for (UObject* Obj : LoadedObjects)
+	{
+		guard(PostLoad);
+		Obj->PostLoad();
+		unguardf("%s", Obj->Name);
+	}
 	// cleanup
 	guard(Cleanup);
 	GObjLoaded.Empty();
@@ -302,7 +308,7 @@ enum EPropType // hardcoded in Unreal
 	NAME_InterfaceProperty = 15,
 #endif
 #if UNREAL4
-	/// reference: CoreUObject/Public/UObject/UnrealNames.inl
+	/// reference: Core/Public/UObject/UnrealNames.inl
 	// Note: real enum indices doesn't matter in UE4 because type serialized as real FName
 	NAME_TextProperty = 14,
 	NAME_AttributeProperty,
@@ -348,18 +354,19 @@ static const struct
 	F(Int64Property),
 	F(Int16Property),
 	F(Int8Property),
+	F(SetProperty),
 #endif
 #undef F
 };
 
+// Find NAME_... value according to FName value. Will return -1 if not found.
 static int MapTypeName(const char *Name)
 {
 	guard(MapTypeName);
 	for (int i = 0; i < ARRAY_COUNT(NameToIndex); i++)
 		if (!stricmp(Name, NameToIndex[i].Name))
 			return NameToIndex[i].Index;
-	appError("MapTypeName: unknown type '%s'", Name);
-	return 0;
+	return INDEX_NONE;
 	unguard;
 }
 
@@ -369,6 +376,8 @@ static const char* GetTypeName(int Index)
 	for (int i = 0; i < ARRAY_COUNT(NameToIndex); i++)
 		if (Index == NameToIndex[i].Index)
 			return NameToIndex[i].Name;
+	if (Index == INDEX_NONE)
+		return "(unknown)";
 	appError("GetTypeName: unknown type index %d", Index);
 	return NULL;
 	unguard;
@@ -428,6 +437,10 @@ struct FPropertyTag
 			int unk1C;
 			Ar << PropType << Tag.Name << Tag.StrucName << Tag.DataSize << unk1C << Tag.BoolValue << Tag.ArrayIndex;
 			Tag.Type = MapTypeName(PropType);
+			if (Tag.Type < 0)
+			{
+				appError("MapTypeName: unknown type '%s' for property '%s'", *PropType, *Tag.Name);
+			}
 			// has special situation: PropType="None", Name="SerializedGroup", StrucName=Name of 1st serialized field,
 			// DataSize = size of UObject block; possible, unk1C = offset of 1st serialized field
 			return Ar;
@@ -446,6 +459,10 @@ struct FPropertyTag
 
 			// type-specific serialization
 			Tag.Type = MapTypeName(PropType);
+			if (Tag.Type < 0)
+			{
+				appNotify("WARNING: MapTypeName: unknown type '%s' for property '%s'", *PropType, *Tag.Name);
+			}
 			if (Tag.Type == NAME_StructProperty)
 			{
 				Ar << Tag.StrucName;
@@ -459,7 +476,7 @@ struct FPropertyTag
 			{
 				Ar << (byte&)Tag.BoolValue;		// byte
 			}
-			else if (Tag.Type == NAME_ByteProperty)
+			else if (Tag.Type == NAME_ByteProperty || Tag.Type == NAME_EnumProperty)
 			{
 				Ar << Tag.EnumName;
 			}
@@ -516,6 +533,10 @@ struct FPropertyTag
 			}
 	#endif // MKVSDC
 			Tag.Type = MapTypeName(PropType);
+			if (Tag.Type < 0)
+			{
+				appError("MapTypeName: unknown type '%s' for property '%s'", *PropType, *Tag.Name);
+			}
 			if (Tag.Type == NAME_StructProperty)
 				Ar << Tag.StrucName;
 			else if (Tag.Type == NAME_BoolProperty)
@@ -526,7 +547,17 @@ struct FPropertyTag
 					Ar << (byte&)Tag.BoolValue;		// byte
 			}
 			else if (Tag.Type == NAME_ByteProperty && Ar.ArVer >= 633)
-				Ar << Tag.EnumName;
+			{
+				bool bHasEnumName = true;
+	#if GEARSU
+				if (Ar.Game == GAME_GoWU) bHasEnumName = false;
+	#endif
+
+				if (bHasEnumName)
+				{
+					Ar << Tag.EnumName;
+				}
+			}
 			return Ar;
 		}
 #endif // UNREAL3
@@ -878,6 +909,10 @@ no_net_index:
 }
 
 
+// References in UE4:
+// UStruct::SerializeVersionedTaggedProperties()
+//  -> FPropertyTag::SerializeTaggedProperty()
+//  -> FXxxProperty::SerializeItem()
 void CTypeInfo::SerializeUnrealProps(FArchive &Ar, void *ObjectData) const
 {
 	guard(CTypeInfo::SerializeUnrealProps);
@@ -1087,15 +1122,6 @@ void CTypeInfo::SerializeUnrealProps(FArchive &Ar, void *ObjectData) const
 				appPrintf("WARNING: skipping BoolProperty %s with Tag.Size=%d\n", *Tag.Name, Tag.DataSize);
 				continue;
 			}
-#if UNREAL4
-			if (Tag.Type == NAME_EnumProperty && Tag.DataSize == 8)
-			{
-				// See NAME_EnumProperty serialization in this function: this property has DataSize==8, but
-				// really nothing is serialized. Verified with 2 games already.
-				appPrintf("WARNING: skipping EnumProperty %s with Tag.Size=%d\n", *Tag.Name, Tag.DataSize);
-				continue;
-			}
-#endif // UNREAL4
 			// skip property data
 			Ar.Seek(StopPos);
 			// serialize other properties
@@ -1215,8 +1241,8 @@ void CTypeInfo::SerializeUnrealProps(FArchive &Ar, void *ObjectData) const
 #undef SIMPLE_ARRAY_TYPE
 				else
 				{
-					// read data count
-					int DataCount;
+					// Read data count like generic TArray serializer does
+					int32 DataCount;
 #if UC2
 					if (Ar.Engine() == GAME_UE2X && Ar.ArVer >= 145)
 					{
@@ -1243,45 +1269,63 @@ void CTypeInfo::SerializeUnrealProps(FArchive &Ar, void *ObjectData) const
 						Ar << InnerTag;
 					}
 #endif // UNREAL4
+
 					//!! note: some structures should be serialized using SerializeStruc() (FVector etc)
-					// find data typeinfo
+					// Find data typeinfo
 					const CTypeInfo *ItemType = FindStructType(Prop->TypeName);
 					if (!ItemType)
 						appError("Unknown structure type %s", Prop->TypeName);
-					// prepare array
+					// Prepare array
 					Arr->Empty(DataCount, ItemType->SizeOf);
 					Arr->InsertZeroed(0, DataCount, ItemType->SizeOf);
-					// serialize items
-					byte *item = (byte*)Arr->GetData();
-					for (int i = 0; i < DataCount; i++, item += ItemType->SizeOf)
+
+#if UNREAL4
+					// Second queue of "simple serializers", but with InnerTag in UE4.12+
+					if (!stricmp(Prop->TypeName, "FLinearColor"))
 					{
-#if DEBUG_PROPS
-						appPrintf("Item[%d]:\n", i);
-#endif
-						assert(ItemType->Constructor);
-						ItemType->Constructor(item);		// fill default properties
-						ItemType->SerializeUnrealProps(Ar, item);
+						// Reference: FMaterialCachedParameters::VectorValues
+						FLinearColor* p = (FLinearColor*)Arr->GetData();
+						for (int i = 0; i < DataCount; i++)
+							Ar << *p++;
 					}
+					else
+#endif // UNREAL4
+					{
+						// Serialize items
+						byte *item = (byte*)Arr->GetData();
+						for (int i = 0; i < DataCount; i++, item += ItemType->SizeOf)
+						{
+#if DEBUG_PROPS
+							appPrintf("Item[%d]:\n", i);
+#endif
+							if (ItemType->Constructor)
+								ItemType->Constructor(item);		// fill default properties
+							else
+								memset(item, 0, ItemType->SizeOf);	// no constructor, just initialize with zeros
+
+							ItemType->SerializeUnrealProps(Ar, item);
+						}
 #if 1
-					// fix for strange (UE?) bug - array[1] of empty structure has 1 extra byte
-					// or size is incorrect - 1 byte smaller than should be (?)
-					// Note: such properties cannot be dropped (PROP_DROP) - invalid Tag.Size !
-					int Pos = Ar.Tell();
-					if (Pos + 1 == StopPos && DataCount == 1)
-					{
-#if DEBUG_PROPS
-						appNotify("%s.%s: skipping 1 byte for array property", Name, *Tag.Name);
-#endif
-						Ar.Seek(StopPos);
+						// Fix for strange (UE?) bug - array[1] of empty structure has 1 extra byte
+						// or size is incorrect - 1 byte smaller than should be (?)
+						// Note: such properties cannot be dropped (PROP_DROP) - invalid Tag.Size !
+						int Pos = Ar.Tell();
+						if (Pos + 1 == StopPos && DataCount == 1)
+						{
+	#if DEBUG_PROPS
+							appNotify("%s.%s: skipping 1 byte for array property", Name, *Tag.Name);
+	#endif
+							Ar.Seek(StopPos);
+						}
+						else if (Pos > StopPos)
+						{
+	#if DEBUG_PROPS
+							appNotify("%s.%s: bad size (%d byte less) for array property", Name, *Tag.Name, Pos - StopPos);
+	#endif
+							StopPos = Pos;
+						}
+#endif // 1 -- end of fix
 					}
-					else if (Pos > StopPos)
-					{
-#if DEBUG_PROPS
-						appNotify("%s.%s: bad size (%d byte less) for array property", Name, *Tag.Name, Pos - StopPos);
-#endif
-						StopPos = Pos;
-					}
-#endif // 1 -- fix
 				}
 #if DEBUG_PROPS
 				appPrintf("  } // count=%d\n", Arr->Num());
@@ -1351,9 +1395,15 @@ void CTypeInfo::SerializeUnrealProps(FArchive &Ar, void *ObjectData) const
 #if UNREAL4
 		case NAME_EnumProperty:
 			{
-				// Possible bug: EnumProperty has DataSize=8, but really serializes nothing
-				//http://www.gildor.org/smf/index.php/topic,6036.0.html
-				StopPos = Ar.Tell();
+				FName EnumValue;
+				Ar << EnumValue;
+				assert(Prop->TypeName[0] == '#')
+				int tmpInt = NameToEnum(Prop->TypeName+1, *EnumValue);
+				if (tmpInt == ENUM_UNKNOWN)
+					appNotify("unknown member %s of enum %s", *EnumValue, Prop->TypeName+1);
+				assert(tmpInt >= 0 && tmpInt <= 255);
+				*value = tmpInt;
+				PROP_DBG("%s", *EnumValue);
 			}
 			break;
 #endif // UNREAL4
@@ -1380,7 +1430,7 @@ void CTypeInfo::SerializeUnrealProps(FArchive &Ar, void *ObjectData) const
 					break;
 				}
 			}
-#endif
+#endif // BATMAN
 			appError("Unknown property type %d, name %s", Tag.Type, *Tag.Name);
 			break;
 		}

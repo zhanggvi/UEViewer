@@ -1,6 +1,7 @@
 #include "Core.h"
 #include "UnCore.h"
 #include "GameDatabase.h"
+#include "UE4Version.h"
 
 /*-----------------------------------------------------------------------------
 	List of supported games
@@ -105,6 +106,9 @@ const GameInfo GListOfGames[] = {
 		G3("Gears of War 2"),
 		G3("Gears of War 3"),
 		G("Gears of War: Judgment", gowj, GAME_GoWJ),
+#	endif
+#	if GEARSU
+		G("Gears of War: Ultimate", gowu, GAME_GoWU),
 #	endif
 #	if SUPPORT_IPHONE
 		G3("Infinity Blade"),
@@ -359,6 +363,9 @@ const GameInfo GListOfGames[] = {
 #	if GEARS4
 		G("Gears of War 4", gears4, GAME_Gears4),
 #	endif
+#	if DAYSGONE
+		G("Days Gone", daysgone, GAME_DaysGone),
+#	endif
 #	if ARK
 		G("Ark: Survival Evolved", ark, GAME_Ark),
 #	endif
@@ -397,6 +404,15 @@ const GameInfo GListOfGames[] = {
 #	endif
 #	if KH3
 		G("Kingdom Hearts 3", kh3, GAME_KH3),
+#	endif
+#	if JEDI
+		G("Star Wars Jedi: Fallen Order", jedi, GAME_Jedi),
+#	endif
+#	if FABLE
+		G("Fable Legends", fablel, GAME_FableLegends),
+#	endif
+#	if SEAOFTHIEVES
+		G("Sea of Thieves", sot, GAME_SeaOfThieves),
 #	endif
 #endif // UNREAL4
 
@@ -557,6 +573,8 @@ const char* GetGameTag(int gameEnum)
 
 void FArchive::DetectGame()
 {
+	guard(FArchive::DetectGame);
+
 	if (GForcePlatform != PLATFORM_UNKNOWN)
 		Platform = GForcePlatform;
 
@@ -576,13 +594,26 @@ void FArchive::DetectGame()
 	}
 #endif
 
+	int check = 0;					// number of detected games; should be 0 or 1, otherwise autodetect is failed
+#define SET(game)	{ Game = game; check++; }
+
+	if (Game == GAME_UE4_BASE)
+	{
+		// Detection for UE4 games
+#if FABLE
+		if (ArVer == 415 && ArLicenseeVer == 17)
+			SET(GAME_FableLegends); // UE4 game
+#endif
+		if (check > 1)
+			appNotify("DetectGame collision: detected %d titles, Ver=%d, LicVer=%d", check, ArVer, ArLicenseeVer);
+		return;
+	}
+
 	// skip autodetection when Ar.Game is explicitly set by SerializePackageFileSummary, when code detects custom package tag
 	if (Game != GAME_UNKNOWN)
 		return;
 
 	// here Game == GAME_UNKNOWN
-	int check = 0;					// number of detected games; should be 0 or 1, otherwise autodetect is failed
-#define SET(game)	{ Game = game; check++; }
 
 	/*-----------------------------------------------------------------------
 	 * UE2 games
@@ -858,6 +889,13 @@ void FArchive::DetectGame()
 	if ((ArVer == 832 || ArVer == 893) && ArLicenseeVer == 21)	// Remember Me (832) or Life Is Strange (893)
 		SET(GAME_RememberMe);
 #endif
+#if GEARSU
+	if (ArVer == 835 && ArLicenseeVer == 56)			// Gears of War: Ultimate
+	{
+		SET(GAME_GoWU);
+		GForceGame = GAME_GoWU;
+	}
+#endif // GEARSU
 #if GIGANTIC
 	if (ArVer == 867 && ArLicenseeVer == 9)
 		SET(GAME_Gigantic);
@@ -879,6 +917,8 @@ void FArchive::DetectGame()
 		// FPackageFileSummary serializer explicitly.
 	}
 #undef SET
+
+	unguard;
 }
 
 #define OVERRIDE_ME1_LVER		90			// real version is 1008, which is greater than LicenseeVersion of Mass Effect 2 and 3
@@ -905,6 +945,9 @@ static const UEVersionMap ueVersions[] =
 	// is defined as GAME_UE4(13), but we're defining package version 4.14.
 	G(GAME_Lawbreakers, VER_UE4_14)
 	#endif
+	#if DAYSGONE
+	G(GAME_DaysGone, 499)					// 500 = VER_UE4_INNER_ARRAY_TAG_INFO, but it's not here
+	#endif
 #endif // UNREAL4
 #if ENDWAR
 	G(GAME_EndWar, 224)
@@ -919,6 +962,9 @@ static const UEVersionMap ueVersions[] =
 	G(GAME_DND, 673)						// real version is 674
 #endif
 	G(GAME_GoWJ, 828)						// real version is 846
+#if GEARSU
+	G(GAME_GoWU, 614)						// real version is 835, version is clamped by FStaticMeshUVItem3
+#endif
 };
 
 #undef G
@@ -930,7 +976,8 @@ static const int ue4Versions[] =
 	VER_UE4_5, VER_UE4_6, VER_UE4_7, VER_UE4_8, VER_UE4_9,
 	VER_UE4_10, VER_UE4_11, VER_UE4_12, VER_UE4_13, VER_UE4_14,
 	VER_UE4_15, VER_UE4_16, VER_UE4_17, VER_UE4_18, VER_UE4_19,
-	VER_UE4_20, VER_UE4_21, VER_UE4_22, VER_UE4_23, VER_UE4_24
+	VER_UE4_20, VER_UE4_21, VER_UE4_22, VER_UE4_23, VER_UE4_24,
+	VER_UE4_25, VER_UE4_26,
 	// NEW_ENGINE_VERSION
 };
 

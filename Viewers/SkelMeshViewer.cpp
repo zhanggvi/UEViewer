@@ -1,16 +1,18 @@
 #include "Core.h"
-#include "UnrealClasses.h"
+#include "UnCore.h"
 
 #if RENDERING
 
+#include "UnObject.h"
+
 #include "ObjectViewer.h"
 #include "../MeshInstance/MeshInstance.h"
-#include "UnMathTools.h"
+#include "UnrealMesh/UnMathTools.h"
 
-#include "UnMesh2.h"		// for UE2 USkeletalMesh and UMeshAnimation
-#include "UnMesh3.h"		// for UAnimSet
-#include "UnMesh4.h"
-#include "SkeletalMesh.h"
+#include "UnrealMesh/UnMesh2.h"		// for UE2 USkeletalMesh and UMeshAnimation
+#include "UnrealMesh/UnMesh3.h"		// for UAnimSet
+#include "UnrealMesh/UnMesh4.h"
+#include "Mesh/SkeletalMesh.h"
 
 #if HAS_UI
 #include "BaseDialog.h"
@@ -600,7 +602,7 @@ UIMenuItem* CSkelMeshViewer::GetObjectMenu(UIMenuItem* menu)
 #endif // HAS_UI
 
 
-void CSkelMeshViewer::ProcessKey(int key)
+void CSkelMeshViewer::ProcessKey(unsigned key)
 {
 	guard(CSkelMeshViewer::ProcessKey);
 #if TEST_ANIMS
@@ -939,7 +941,19 @@ void CSkelMeshViewer::FindUE4Animations()
 	const char* lookupSkeletonName = Skeleton->Name;
 	for (int i = 0; i < PackageInfos.Num(); i++)
 	{
-		UnPackage* package = PackageInfos[i]->Package;
+		const CGameFileInfo* info = PackageInfos[i];
+		UnPackage* package = info->Package;
+		if (!package)
+		{
+			// Shouldn't happen, but happens (ScanPackage() should fill Package for all CGameFileInfo).
+			// Example of appearance: ScanPackages may open a WRONG find in a case when game files are extracted from pak, and
+			// user supplies wrong (shorter) game path, e.g. -path=Extported/Meshes, and multiple files with the same name
+			// exists inside that folder. CGameFileInfo::Find has heuristic for finding files using partial path, but it may fail.
+			// In this case, CGameFileInfo will say "it's package", but actually file won't be scanned and/or loaded.
+			//appNotify("Strange package: IsPackage=true, Package is NULL: %s (size %d Kb)", *info->GetRelativeName(), info->SizeInKb + info->ExtraSizeInKb);
+			continue;
+		}
+
 		bool found = false;
 		for (int importIndex = 0; importIndex < package->Summary.ImportCount; importIndex++)
 		{
@@ -951,8 +965,8 @@ void CSkelMeshViewer::FindUE4Animations()
 				// This uasset refers to the Skeleton object with the same name, check if this
 				// is an exactly the same Skeleton object as we're using
 				const char* referencedFilename = package->GetObjectPackageName(imp.PackageIndex);
-				const CGameFileInfo* referencedFile = appFindGameFile(referencedFilename);
-				if (!stricmp(Skeleton->Package->Filename, *referencedFile->GetRelativeName()))
+				const CGameFileInfo* referencedFile = CGameFileInfo::Find(referencedFilename);
+				if (Skeleton->Package->FileInfo == referencedFile)
 				{
 					found = true;
 					break;
@@ -981,7 +995,7 @@ void CSkelMeshViewer::FindUE4Animations()
 	{
 		guard(Load);
 		UnPackage* package = packagesToLoad[i];
-		if (!progress.Progress(package->Filename, i, packagesToLoad.Num()))
+		if (!progress.Progress(*package->GetFilename(), i, packagesToLoad.Num()))
 			break;
 		LoadWholePackage(package);
 		unguardf("%d/%d", i, packagesToLoad.Num());
@@ -992,7 +1006,7 @@ void CSkelMeshViewer::FindUE4Animations()
 }
 
 
-void CSkelMeshViewer::ProcessKeyUp(int key)
+void CSkelMeshViewer::ProcessKeyUp(unsigned key)
 {
 	CSkelMeshInstance *MeshInst = static_cast<CSkelMeshInstance*>(Inst);
 	switch (key)

@@ -10,6 +10,12 @@ while [ "$1" ]; do
 			debug=1
 			shift
 			;;
+		--profile)
+			profile=1
+			PLATFORM="vc-win64"			# force 64 bit build for profiler
+			VC32TOOLS_OPTIONS="--64"
+			shift
+			;;
 		--vc)
 			vc_ver=$2
 			shift 2
@@ -26,7 +32,7 @@ while [ "$1" ]; do
 			shift 2
 			;;
 		*)
-			echo "Usage: build.sh [--debug] [--vc <version>] [--64] [--file <cpp file>]"
+			echo "Usage: build.sh [--debug] [--profile] [--vc <version>] [--64] [--file <cpp file>]"
 			exit
 			;;
 	esac
@@ -69,6 +75,7 @@ last_revision=${last_revision##* }		# cut "#define ..."
 
 # force PLATFORM=linux under Linux OS
 [ "$OSTYPE" == "linux-gnu" ] || [ "$OSTYPE" == "linux" ] && PLATFORM="linux"
+[[ "$OSTYPE" == "darwin"* ]] && PLATFORM=osx
 #[ "$PLATFORM" == "linux" ] && PLATFORM="linux64"
 
 if [ "${PLATFORM:0:3}" == "vc-" ]; then
@@ -97,9 +104,7 @@ if [ $render -eq 1 ]; then
 	fi
 	# build shaders
 	#?? move to makefile
-	cd "Unreal/Shaders"
-	./make.pl
-	cd "../.."
+	Unreal/Shaders/make.pl
 fi
 
 # prepare makefile parameters, store in obj directory
@@ -108,9 +113,13 @@ makefile="$root/obj/$projectName-$PLATFORM"
 if ! [ -d $root/obj ]; then
 	mkdir $root/obj
 fi
+# debugging options
 if [ "$debug" ]; then
 	makefile="${makefile}-debug"
 	GENMAKE_OPTIONS+=" DEBUG=1"
+elif [ "$profile" ]; then
+	makefile="${makefile}-profile"
+	GENMAKE_OPTIONS+=" TRACY=1"
 fi
 makefile="${makefile}.mak"
 
@@ -170,11 +179,11 @@ fi
 case "$PLATFORM" in
 	"vc-win32")
 		Make $makefile $target || exit 1
-		cp $root/libs/SDL2/x86/SDL2.dll .
+		[ $render -eq 1 ] && cp $root/libs/SDL2/x86/SDL2.dll .
 		;;
 	"vc-win64")
 		Make $makefile $target || exit 1
-		cp $root/libs/SDL2/x64/SDL2.dll .
+		[ $render -eq 1 ] && cp $root/libs/SDL2/x64/SDL2.dll .
 		;;
 	"mingw32"|"cygwin")
 		PATH=/bin:/usr/bin:$PATH					# configure paths for Cygwin
@@ -182,6 +191,9 @@ case "$PLATFORM" in
 		;;
 	linux*)
 		make -j 4 -f $makefile $target || exit 1	# use 4 jobs for build
+		;;
+	osx)
+		make -f $makefile $target || exit 1
 		;;
 	*)
 		echo "Unknown PLATFORM=\"$PLATFORM\""

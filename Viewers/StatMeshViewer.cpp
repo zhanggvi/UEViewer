@@ -1,13 +1,15 @@
 #include "Core.h"
-#include "UnrealClasses.h"
+#include "UnCore.h"
 
 #if RENDERING
 
+#include "UnObject.h"
+
 #include "ObjectViewer.h"
 #include "../MeshInstance/MeshInstance.h"
-#include "UnMathTools.h"
+#include "UnrealMesh/UnMathTools.h"
 
-#include "StaticMesh.h"
+#include "Mesh/StaticMesh.h"
 
 #if HAS_UI
 #include "BaseDialog.h"
@@ -126,7 +128,7 @@ UIMenuItem* CStatMeshViewer::GetObjectMenu(UIMenuItem* menu)
 #endif // HAS_UI
 
 
-void CStatMeshViewer::ProcessKey(int key)
+void CStatMeshViewer::ProcessKey(unsigned key)
 {
 	guard(CStatMeshViewer::ProcessKey);
 

@@ -1049,7 +1049,7 @@ fn ImportPskFile filename skelOnly:false =
 			"MATT0000":
 				(
 					numMaterials = hdr.DataCount
-					Materials[numMaterials] = VMaterial ()	-- preallocate
+					if numMaterials > 0 then Materials[numMaterials] = VMaterial ()	-- preallocate
 					for i = 1 to numMaterials do Materials[i] = ReadVMaterial file
 				)
 
@@ -2064,7 +2064,7 @@ rollout axInfoRollout "ActorX Importer"
 (
 	-- copyright label
 	label     Lbl1 "Version 1.38"
-	label     Lbl2 "\xA9 2009-2019 Konstantin Nosov (Gildor)"
+	label     Lbl2 "\xA9 2009-2020 Konstantin Nosov (Gildor)"
 	hyperlink Lbl3 "http://www.gildor.org/" \
 					address:"http://www.gildor.org/projects/unactorx" align:#center \
 					color:black hovercolor:blue visitedcolor:black

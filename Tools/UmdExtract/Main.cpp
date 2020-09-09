@@ -1,7 +1,7 @@
 #include "Core.h"
-#include "UnrealClasses.h"
+#include "UnCore.h"
 #include "UnPackage.h"
-#include "UnUbisoft.h"
+#include "GameSpecific/UnUbisoft.h"
 
 #define DEF_UNP_DIR		"unpacked"
 #define HOMEPAGE		"https://www.gildor.org/"
@@ -124,16 +124,7 @@ int main(int argc, char **argv)
 
 #if DO_GUARD
 	} CATCH {
-		if (GErrorHistory[0])
-		{
-//			printf("ERROR: %s\n", GErrorHistory);
-			appNotify("ERROR: %s\n", GErrorHistory);
-		}
-		else
-		{
-//			printf("Unknown error\n");
-			appNotify("Unknown error\n");
-		}
+		GError.StandardHandler();
 		exit(1);
 	}
 #endif

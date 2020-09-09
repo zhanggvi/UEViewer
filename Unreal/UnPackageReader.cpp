@@ -6,6 +6,8 @@
 
 #include "UnPackageUE3Reader.h"
 
+byte GForceCompMethod = 0;		// COMPRESS_...
+
 /*-----------------------------------------------------------------------------
 	Lineage2 file reader
 -----------------------------------------------------------------------------*/
@@ -336,6 +338,14 @@ public:
 
 	// setup FArchive
 	FArchive* Loader = (baseLoader) ? baseLoader : new FFileReader(filename);
+
+	if (Loader->GetFileSize() < 16)
+	{
+		// The file is too small, possibly invalid one.
+		if (!baseLoader)
+			delete Loader;
+		return NULL;
+	}
 
 	// Pick 32-bit integer from archive to determine its type
 	uint32 checkDword;

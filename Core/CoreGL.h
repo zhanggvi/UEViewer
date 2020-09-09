@@ -5,8 +5,13 @@
 
 #include "Win32Types.h"
 
+#ifndef __APPLE__
 #include <GL/gl.h>
 #include <GL/glext.h>
+#else
+#include <OpenGL/gl.h>
+#include <OpenGL/glext.h>
+#endif
 
 #define USE_SDL			1
 #include "GLBind.h"
@@ -45,6 +50,12 @@ inline void GL_ResetError()
 
 extern int GCurrentFrame;		// current rendering frame number
 extern int GContextFrame;		// frame number when GL context was (re)created
+
+inline void InvalidateContext()
+{
+	GContextFrame = GCurrentFrame + 1;
+	GCurrentFrame += 2;
+}
 
 inline bool GL_IsValidObject(unsigned handle, int timestamp)
 {

@@ -1,7 +1,6 @@
-#include "BaseDialog.h"
-
 #if HAS_UI
 
+#include "BaseDialog.h"
 #include "StartupDialog.h"
 #include "FileControls.h"
 
@@ -96,6 +95,7 @@ void UIStartupDialog::InitUI()
 			+ NewControl(UICheckbox, "Static mesh",   &Opt.UseStaticMesh)
 			+ NewControl(UICheckbox, "Animation",     &Opt.UseAnimation)
 			+ NewControl(UICheckbox, "Textures",      &Opt.UseTexture)
+			+ NewControl(UICheckbox, "MorphTargets",  &Opt.UseMorphTarget)
 			+ NewControl(UICheckbox, "Lightmaps",     &Opt.UseLightmapTexture)
 		]
 		+ NewControl(UIGroup, GROUP_NO_BORDER)
@@ -112,7 +112,7 @@ void UIStartupDialog::InitUI()
 	[
 		NewControl(UIGroup, GROUP_HORIZONTAL_LAYOUT|GROUP_NO_BORDER)
 		[
-			NewControl(UIGroup, "Package compression", GROUP_HORIZONTAL_LAYOUT|GROUP_HORIZONTAL_SPACING)
+			NewControl(UIGroup, "UE3 package compression", GROUP_HORIZONTAL_LAYOUT|GROUP_HORIZONTAL_SPACING)
 			.SetWidth(EncodeWidth(1.0f))
 			.SetRadioVariable(&Opt.PackageCompression)
 			[

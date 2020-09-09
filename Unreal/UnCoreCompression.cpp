@@ -194,9 +194,22 @@ void DecryptBladeAndSoul(byte* CompressedBuffer, int CompressedSize);
 void DecryptTaoYuan(byte* CompressedBuffer, int CompressedSize);
 void DecryptDevlsThird(byte* CompressedBuffer, int CompressedSize);
 
+static int FoundCompression = -1;
+
 int appDecompress(byte *CompressedBuffer, int CompressedSize, byte *UncompressedBuffer, int UncompressedSize, int Flags)
 {
+	int OldFlags = Flags;
+
 	guard(appDecompress);
+
+#if GEARSU
+	if (GForceGame == GAME_GoWU)
+	{
+		// It is strange, but this game has 2 Flags both used for LZ4 - probably they were used for different compression
+		// settings of the same algorithm.
+		if (Flags == 4 || Flags == 32) Flags = COMPRESS_LZ4;
+	}
+#endif // GEARSU
 
 #if BLADENSOUL
 	if (GForceGame == GAME_BladeNSoul && Flags == COMPRESS_LZO_ENC_BNS)	// note: GForceGame is required (to not pass 'Game' here)
@@ -208,12 +221,23 @@ int appDecompress(byte *CompressedBuffer, int CompressedSize, byte *Uncompressed
 #endif // BLADENSOUL
 
 #if SMITE
-	if (GForceGame == GAME_Smite && Flags == COMPRESS_LZO_ENC_SMITE)
+	if (GForceGame == GAME_Smite)
 	{
-		for (int i = 0; i < CompressedSize; i++)
-			CompressedBuffer[i] ^= 0x2A;
-		// overide compression
-		Flags = COMPRESS_LZO;
+		if (Flags & 512)
+		{
+			// Simple encryption
+			for (int i = 0; i < CompressedSize; i++)
+				CompressedBuffer[i] ^= 0x2A;
+			// Remove encryption flag
+			Flags &= ~512;
+		}
+	#if USE_OODLE
+		if (Flags == 8)
+		{
+			// Overide compression, appeared in late 2019 builds
+			Flags = COMPRESS_OODLE;
+		}
+	#endif
 	}
 #endif // SMITE
 
@@ -228,12 +252,19 @@ int appDecompress(byte *CompressedBuffer, int CompressedSize, byte *Uncompressed
 	if ((GForceGame == GAME_DevilsThird) && (Flags & 8))
 	{
 		DecryptDevlsThird(CompressedBuffer, CompressedSize);
-		// overide compression
+		// override compression
 		Flags &= ~8;
 	}
 #endif // DEVILS_THIRD
 
-	if (Flags == COMPRESS_FIND && CompressedSize >= 2)
+	if (Flags == COMPRESS_FIND && FoundCompression >= 0)
+	{
+		// Do not detect compression multiple times: there were cases (Sea of Thieves) when
+		// game is using LZ4 compression, however its first 2 bytes occasionally matched oodle,
+		// so one of blocks were mistakenly used oodle.
+		Flags = FoundCompression;
+	}
+	else if (Flags == COMPRESS_FIND && CompressedSize >= 2)
 	{
 		byte b1 = CompressedBuffer[0];
 		byte b2 = CompressedBuffer[1];
@@ -241,13 +272,31 @@ int appDecompress(byte *CompressedBuffer, int CompressedSize, byte *Uncompressed
 		// zlib:
 		//   http://tools.ietf.org/html/rfc1950
 		//   http://stackoverflow.com/questions/9050260/what-does-a-zlib-header-look-like
+		// oodle:
+		//   https://github.com/powzix/ooz, kraken.cpp, Kraken_ParseHeader()
 		if ( b1 == 0x78 &&					// b1=CMF: 7=32k buffer (CINFO), 8=deflate (CM)
 			(b2 == 0x9C || b2 == 0xDA) )	// b2=FLG
 		{
 			Flags = COMPRESS_ZLIB;
 		}
+#if USE_OODLE
+		else if ((b1 == 0x8C || b1 == 0xCC) && (b2 == 5 || b2 == 6 || b2 == 10 || b2 == 11 || b2 == 12))
+		{
+			Flags = COMPRESS_OODLE;
+		}
+#endif // USE_OODLE
+#if USE_LZ4
+		else if (GForceGame >= GAME_UE4_BASE)
+		{
+			Flags = COMPRESS_LZ4;		// in most cases UE4 games are using either oodle or lz4 - the first one is explicitly recognizable
+		}
+#endif // USE_LZ4
 		else
-			Flags = COMPRESS_LZO;
+		{
+			Flags = COMPRESS_LZO;		// LZO was used only with UE3 games as standard compression method
+		}
+		// Cache detected compression method
+		FoundCompression = Flags;
 	}
 
 	if (Flags == COMPRESS_LZO)
@@ -307,7 +356,7 @@ int appDecompress(byte *CompressedBuffer, int CompressedSize, byte *Uncompressed
 		return newLen;
 #	endif // USE_XDK
 #else  // SUPPORT_XBOX360
-		appError("appDecompress: LZX compression is not supported");
+		appError("appDecompress: Lzx compression is not supported");
 #endif // SUPPORT_XBOX360
 	}
 
@@ -320,12 +369,28 @@ int appDecompress(byte *CompressedBuffer, int CompressedSize, byte *Uncompressed
 		if (newLen != UncompressedSize) appError("lz4 len mismatch: %d != %d", newLen, UncompressedSize);
 		return newLen;
 	}
-#endif // GEARS4
+#endif // USE_LZ4
+
+#if USE_OODLE // defined for supported engine versions
+	if (Flags == COMPRESS_OODLE)
+	{
+	#if HAS_OODLE // defined in project file
+		int Kraken_Decompress(const byte *src, size_t src_len, byte *dst, size_t dst_len);
+		int newLen = Kraken_Decompress(CompressedBuffer, CompressedSize, UncompressedBuffer, UncompressedSize);
+		if (newLen <= 0)
+			appError("Kraken_Decompress returned %d (magic=%02X/%02X)\n", newLen, CompressedBuffer[0], CompressedBuffer[1]);
+		if (newLen != UncompressedSize) appError("oodle len mismatch: %d != %d", newLen, UncompressedSize);
+		return newLen;
+	#else
+		appError("appDecompress: Oodle compression is not supported");
+	#endif // HAS_OODLE
+	}
+#endif // USE_OODLE
 
 	appError("appDecompress: unknown compression flags: %d", Flags);
 	return 0;
 
-	unguardf("CompSize=%d UncompSize=%d Flags=0x%X", CompressedSize, UncompressedSize, Flags);
+	unguardf("CompSize=%d UncompSize=%d Flags=0x%X", CompressedSize, UncompressedSize, OldFlags);
 }
 
 
@@ -350,11 +415,11 @@ void appDecryptAES(byte* Data, int Size, const char* Key, int KeyLen)
 
 	if (KeyLen == 0)
 	{
-		appError("Trying to decrypt AES block without providing an AES key");
+		appErrorNoLog("Trying to decrypt AES block without providing an AES key");
 	}
 	if (KeyLen < KEYLENGTH(AES_KEYBITS))
 	{
-		appError("AES key is too short");
+		appErrorNoLog("AES key is too short");
 	}
 
 	assert((Size & 15) == 0);

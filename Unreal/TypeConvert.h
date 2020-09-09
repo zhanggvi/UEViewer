@@ -7,6 +7,7 @@
 
 struct FMeshUVFloat;
 struct CMeshUVFloat;
+struct FPackedNormal;
 
 
 #define CONVERTER(From, To)					\
@@ -33,7 +34,9 @@ CONVERTER(FVector,         CVec3          )
 CONVERTER(FQuat,           CQuat          )
 CONVERTER(FCoords,         CCoords        )
 CONVERTER(FMeshUVFloat,    CMeshUVFloat   )
+#if UNREAL3
 CONVERTER(FVector2D,       CMeshUVFloat   )
+#endif
 CONVERTER(TArray<FVector>, TArray<CVec3>  )
 CONVERTER(TArray<FQuat>,   TArray<CQuat>  )
 CONVERTER(TArray<FCoords>, TArray<CCoords>)
@@ -41,7 +44,7 @@ CONVERTER(TArray<FCoords>, TArray<CCoords>)
 #undef CONVERTER
 
 
-#ifdef __MESH_COMMON_H__
+#if defined(__MESH_COMMON_H__) && defined(__UNMESH_TYPES_H__) //todo: not nice
 
 FORCEINLINE CPackedNormal CVT(FPackedNormal V)
 {

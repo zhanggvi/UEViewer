@@ -6,6 +6,8 @@
 
 #define MAX_CLASSES		256
 #define MAX_ENUMS		32
+#define MAX_SUPPRESSED_CLASSES 32
+#define MAX_DUMP_LINE	48
 
 //#define DEBUG_TYPES				1
 
@@ -14,9 +16,11 @@
 -----------------------------------------------------------------------------*/
 
 static CClassInfo GClasses[MAX_CLASSES];
-static int        GClassCount = 0;
+static int GClassCount = 0;
+static const char* GSuppressedClasses[MAX_SUPPRESSED_CLASSES];
+static int GSuppressedClassCount = 0;
 
-void RegisterClasses(const CClassInfo *Table, int Count)
+void RegisterClasses(const CClassInfo* Table, int Count)
 {
 	if (Count <= 0) return;
 	assert(GClassCount + Count < ARRAY_COUNT(GClasses));
@@ -47,8 +51,7 @@ void RegisterClasses(const CClassInfo *Table, int Count)
 }
 
 
-// may be useful
-void UnregisterClass(const char *Name, bool WholeTree)
+void UnregisterClass(const char* Name, bool WholeTree)
 {
 	for (int i = 0; i < GClassCount; i++)
 		if (!strcmp(GClasses[i].Name + 1, Name) ||
@@ -71,7 +74,17 @@ void UnregisterClass(const char *Name, bool WholeTree)
 }
 
 
-const CTypeInfo *FindClassType(const char *Name, bool ClassType)
+void SuppressUnknownClass(const char* ClassNameWildcard)
+{
+	assert(GSuppressedClassCount < ARRAY_COUNT(GSuppressedClasses));
+#if DEBUG_TYPES
+	appPrintf("Suppress %s\n", ClassNameWildcard);
+#endif
+	GSuppressedClasses[GSuppressedClassCount++] = ClassNameWildcard;
+}
+
+
+const CTypeInfo* FindClassType(const char* Name, bool ClassType)
 {
 	guard(FindClassType);
 #if DEBUG_TYPES
@@ -102,6 +115,17 @@ const CTypeInfo *FindClassType(const char *Name, bool ClassType)
 #endif
 	return NULL;
 	unguardf("%s", Name);
+}
+
+
+bool IsSuppressedClass(const char* Name)
+{
+	for (int i = 0; i < GSuppressedClassCount; i++)
+	{
+		if (appMatchWildcard(Name, GSuppressedClasses[i] + 1))
+			return true;
+	}
+	return false;
 }
 
 
@@ -234,10 +258,12 @@ struct CPropDump
 	FString				Name;
 	FString				Value;
 	TArray<CPropDump>	Nested;				// Value should be "" when Nested[] is not empty
-	bool				IsArrayItem;
+	bool				bIsArrayItem;
+	bool				bDiscard;
 
 	CPropDump()
-	: IsArrayItem(false)
+	: bIsArrayItem(false)
+	, bDiscard(false)
 	{}
 
 	void PrintName(const char *fmt, ...)
@@ -254,6 +280,11 @@ struct CPropDump
 		va_start(argptr, fmt);
 		PrintTo(Value, fmt, argptr);
 		va_end(argptr);
+	}
+
+	void Discard()
+	{
+		bDiscard = true;
 	}
 
 private:
@@ -330,7 +361,7 @@ static void CollectProps(const CTypeInfo *Type, const void *Data, CPropDump &Dum
 					// create nested CPropDump
 					PD2 = new (PD->Nested) CPropDump;
 					PD2->PrintName("%s[%d]", Prop->Name, ArrayIndex);
-					PD2->IsArrayItem = true;
+					PD2->bIsArrayItem = true;
 				}
 
 				// note: ArrayIndex is used inside PROP macro
@@ -360,7 +391,13 @@ static void CollectProps(const CTypeInfo *Type, const void *Data, CPropDump &Dum
 						PD2->PrintValue("%s'%s'", obj->GetClassName(), ObjName);
 					}
 					else
+					{
+						if (IsArray)
+						{
+							PD2->Discard();
+						}
 						PD2->PrintValue("None");
+					}
 				}
 #else
 				PROCESS(UObject*, "%s", PROP(UObject*) ? PROP(UObject*)->Name : "Null");
@@ -395,7 +432,7 @@ static void PrintProps(const CPropDump &Dump, FArchive& Ar, int Indent, bool Top
 {
 	PrintIndent(Ar, Indent);
 
-	int NumNestedProps = Dump.Nested.Num();
+	const int NumNestedProps = Dump.Nested.Num();
 	if (NumNestedProps)
 	{
 		// complex property
@@ -411,16 +448,17 @@ static void PrintProps(const CPropDump &Dump, FArchive& Ar, int Indent, bool Top
 		int i;
 
 		// check whether we can display all nested properties in a single line or not
-		for (i = 0; i < NumNestedProps; i++)
+		for (const CPropDump &Prop : Dump.Nested)
 		{
-			const CPropDump &Prop = Dump.Nested[i];
+			if (Prop.bDiscard) continue;
+
 			if (Prop.Nested.Num())
 			{
 				IsSimple = false;
 				break;
 			}
 			TotalLen += Prop.Value.Len() + 2;
-			if (!Prop.IsArrayItem)
+			if (!Prop.bIsArrayItem)
 				TotalLen += Prop.Name.Len();
 			if (TotalLen >= MaxLineWidth)
 			{
@@ -433,11 +471,18 @@ static void PrintProps(const CPropDump &Dump, FArchive& Ar, int Indent, bool Top
 		{
 			// single-line value display
 			Ar.Printf(" { ");
-			for (i = 0; i < NumNestedProps; i++)
+			bool bFirst = true;
+			for (const CPropDump &Prop : Dump.Nested)
 			{
-				if (i) Ar.Printf(", ");
-				const CPropDump &Prop = Dump.Nested[i];
-				if (Prop.IsArrayItem)
+				if (Prop.bDiscard) continue;
+
+				if (!bFirst)
+				{
+					Ar.Printf(", ");
+				}
+				bFirst = false;
+
+				if (Prop.bIsArrayItem)
 					Ar.Printf("%s", *Prop.Value);
 				else
 					Ar.Printf("%s=%s", *Prop.Name, *Prop.Value);
@@ -454,9 +499,10 @@ static void PrintProps(const CPropDump &Dump, FArchive& Ar, int Indent, bool Top
 				Ar.Printf("{\n");
 			}
 
-			for (i = 0; i < NumNestedProps; i++)
+			for (const CPropDump &Prop : Dump.Nested)
 			{
-				PrintProps(Dump.Nested[i], Ar, Indent+1, false, MaxLineWidth);
+				if (Prop.bDiscard) continue;
+				PrintProps(Prop, Ar, Indent+1, false, MaxLineWidth);
 			}
 
 			if (!TopLevel)
@@ -495,7 +541,7 @@ void CTypeInfo::SaveProps(const void *Data, FArchive& Ar) const
 	CollectProps(this, Data, Dump);
 
 	// Note: using indent -1 for better in-file formatting
-	PrintProps(Dump, Ar, -1, true, 20);
+	PrintProps(Dump, Ar, -1, true, MAX_DUMP_LINE);
 
 	unguard;
 }

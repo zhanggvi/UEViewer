@@ -1,5 +1,5 @@
 UE Viewer
-(c) Konstantin Nosov (Gildor), 2007-2019
+(c) Konstantin Nosov (Gildor), 2007-2020
 
 
 Please support the development by making a donation here:
@@ -209,9 +209,74 @@ detex
   (c) Harm Hanemaaijer
   https://github.com/hglm/detex
 
+ooz
+  (c) Powzix
+  https://github.com/powzix/ooz
+
 
 Changes
 ~~~~~~~
+01.09.2020
+- bugfix: exporting of all referenced textures from materials didn't work
+
+14.08.2020
+- Gears of War Ultimate Edition support
+
+31.07.2020
+- full Fable Legends (canceled game) support
+
+28.07.2020
+- use Ctrl+MouseWheel to scroll long window texts (in addition to Ctrl+PgUp/PgDn)
+
+27.07.2020
+- highlighting mesh material in "show materials" (M key) mode when mouse hovered over material name
+- navigation between referenced objects: material names, texture names, etc works as hyperlinks in "M" mode
+  for mesh and material; navigation back/forward over history could be done with Alt+Left/Right keys
+
+23.07.2020
+- Sea of Thieves support, requires game override (-game=sot)
+
+21.07.2020
+- UE2 Cubemap support
+- UE4 TextureCube support
+
+13.07.2020
+- multiple optimizations (mostly for multi-core CPU), could be disabled with "-nomt" command line option
+
+25.06.2020
+- recognition of duplicated files when exporting UE3 content
+
+24.06.2020
+- faster export when part of assets were already exported and "don't overwrite already exported files" is enabled
+
+22.06.2020
+- reading UE3/UE4 material expressions for collecting Material's parameters and their values; this extends
+  material outline, dump and export information
+
+30.05.2020
+- completed UE4.25 support
+
+15.03.2020
+- added UE3 iOS and WiiU sound export
+
+21.02.2020
+- support for UE4.25 pak file format
+
+10.01.2020
+- updated SMITE support
+
+05.01.2020
+- added Days Gone (PS4) support, required game override -game=daysgone
+
+29.12.2019
+- added option to disable MorphTarget loading: available in UI and with -nomorph command line option
+
+21.11.2019
+- added Star Wars Jedi: Fallen Order support, requires game override (-game=jedi)
+
+16.11.2019
+- added oodle decompression support
+
 22.10.2019
 - finalized UE4.23 support, initial UE4.24 support
 

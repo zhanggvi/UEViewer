@@ -1,6 +1,8 @@
 #ifndef __OBJECT_VIEWER_H__
 #define __OBJECT_VIEWER_H__
 
+#if RENDERING
+
 #include "GlWindow.h"
 
 
@@ -14,6 +16,8 @@ class CStaticMesh;
 struct CMeshVertex;
 struct CBaseMeshLod;
 
+class UUnrealMaterial;
+class UVertMesh;
 class USkeleton;
 
 class UIMenuItem;
@@ -31,8 +35,10 @@ class CObjectViewer
 public:
 	UObject*		Object;
 	CApplication*	Window;
+	const UObject*	JumpAfterFrame;
 
 	CObjectViewer(UObject* Obj, CApplication* Win);
+
 	virtual ~CObjectViewer()
 	{}
 
@@ -46,8 +52,8 @@ public:
 	virtual void Export();
 	virtual void ShowHelp();
 	virtual void Draw2D();
-	virtual void ProcessKey(int key);
-	virtual void ProcessKeyUp(int key)
+	virtual void ProcessKey(unsigned key);
+	virtual void ProcessKeyUp(unsigned key)
 	{}
 
 #if HAS_UI
@@ -56,6 +62,11 @@ public:
 
 	virtual void Draw3D(float TimeDelta)
 	{}
+
+	void JumpTo(const UObject* Object)
+	{
+		JumpAfterFrame = Object;
+	}
 };
 
 
@@ -75,10 +86,14 @@ public:
 	virtual ~CMaterialViewer() override;
 
 	virtual void ShowHelp() override;
-	virtual void ProcessKey(int key) override;
+	virtual void ProcessKey(unsigned key) override;
 
 	virtual void Draw2D() override;
 	virtual void Draw3D(float TimeDelta) override;
+
+protected:
+	void FlushProps();
+	void OutlineMaterial(UObject *Obj, int indent = 0);
 };
 
 
@@ -105,7 +120,7 @@ public:
 	void InitViewerPosition(const CVec3 &Mins, const CVec3 &Maxs);	//?? CBox Bounds?
 
 	virtual void ShowHelp() override;
-	virtual void ProcessKey(int key) override;
+	virtual void ProcessKey(unsigned key) override;
 #if HAS_UI
 	virtual UIMenuItem* GetObjectMenu(UIMenuItem* menu) override;
 #endif
@@ -114,6 +129,8 @@ public:
 
 	virtual void DrawMesh(CMeshInstance *Inst);
 
+	// Print a text about mesh material. Automatically highlights material if mouse points
+	// at its text record on screen.
 	void PrintMaterialInfo(int Index, UUnrealMaterial *Material, int NumFaces);
 
 	void DisplayUV(const CMeshVertex* Verts, int VertexSize, const CBaseMeshLod* Mesh, int UVIndex);
@@ -132,7 +149,7 @@ public:
 	CVertMeshViewer(UVertMesh* Mesh, CApplication* Window);
 
 	virtual void ShowHelp() override;
-	virtual void ProcessKey(int key) override;
+	virtual void ProcessKey(unsigned key) override;
 	virtual void Dump() override;
 	virtual void Export() override;
 #if TEST_FILES
@@ -173,8 +190,8 @@ public:
 	virtual void Export() override;
 	virtual void Draw2D() override;
 	virtual void Draw3D(float TimeDelta) override;
-	virtual void ProcessKey(int key) override;
-	virtual void ProcessKeyUp(int key) override;
+	virtual void ProcessKey(unsigned key) override;
+	virtual void ProcessKeyUp(unsigned key) override;
 
 	void SetAnim(const CAnimSet* AnimSet);
 
@@ -209,7 +226,7 @@ public:
 
 	virtual void Dump() override;
 	virtual void Draw2D() override;
-	virtual void ProcessKey(int key) override;
+	virtual void ProcessKey(unsigned key) override;
 
 private:
 	CStaticMesh		*Mesh;
@@ -258,5 +275,7 @@ private:
 	}
 
 #endif
+
+#endif // RENDERING
 
 #endif // __OBJECT_VIEWER_H__

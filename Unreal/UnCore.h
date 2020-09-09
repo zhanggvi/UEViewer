@@ -76,15 +76,6 @@ void appPrintProfiler(const char* label = NULL);
 #define MAX_PACKAGE_PATH		512
 
 /*-----------------------------------------------------------------------------
-	Game compatibility
------------------------------------------------------------------------------*/
-
-// BIOSHOCK requires UNREAL3
-#if !UNREAL3
-#undef BIOSHOCK
-#endif
-
-/*-----------------------------------------------------------------------------
 	Game directory support
 -----------------------------------------------------------------------------*/
 
@@ -101,55 +92,75 @@ class FVirtualFileSystem;
 
 struct CGameFileInfo
 {
-	friend void appRegisterGameFile(const char *FullName, FVirtualFileSystem* parentVfs);
-	friend const CGameFileInfo* appFindGameFile(const char *Filename, const char *Ext);
-
-	CGameFileInfo* HashNext;						// used for fast search; computed from ShortFilename excluding extension
+public:
+	// Placed here for better cache locality
+	uint16		FolderIndex;						// index of folder containing the file (folder is relative to game directory)
+	bool		IsPackage;
 
 protected:
-	const char*	RelativeName;						// relative to RootDirectory
+	uint8		ExtensionOffset;					// Extension = ShortName+ExtensionOffset, points after '.'
+	CGameFileInfo* HashNext;						// used for fast search; computed from ShortFilename excluding extension
+
 	const char*	ShortFilename;						// without path, points to filename part of RelativeName
-	const char*	Extension;							// points to extension part (excluding '.') of RelativeName
 
 public:
 	FVirtualFileSystem* FileSystem;					// owning virtual file system (NULL for OS file system)
 	UnPackage*	Package;							// non-null when corresponding package is loaded
 
 	int64		Size;								// file size, in bytes
+													//todo: always used as 32-bit value??
 	int32		SizeInKb;							// file size, in kilobytes
 	int32		ExtraSizeInKb;						// size of additional non-package files (ubulk, uexp etc)
-	bool		IsPackage;
+	int32		IndexInVfs;							// index in VFS directory; 16 bits are not enough
 
-	// content information, valid when PackageScanned is true
-	bool		PackageScanned;
+	// content information, valid when IsPackageScanned is true
+	//todo: can store index in some global Info structure, reuse Info for matching cases,
+	//todo: e.g. when uasset has Skel=1+Other=0, or All=0 etc; Index=-1 = not scanned
+	bool		IsPackageScanned;
 	uint16		NumSkeletalMeshes;
 	uint16		NumStaticMeshes;
 	uint16		NumAnimations;
 	uint16		NumTextures;
 
+	// Find/register stuff
+
+	// Low-level function. Register a file inside VFS (parentVFS may be null). No VFS check is performed here.
+	static CGameFileInfo* Register(FVirtualFileSystem* parentVfs, const struct CRegisterFileInfo& RegisterInfo);
+
+	// Ext = NULL -> use any package extension
+	// Filename can contain extension, but should not contain path.
+	// This function is quite fast because it uses hash tables.
+	static const CGameFileInfo* Find(const char *Filename, int GameFolder = -1);
+
+	// Find all files with the same base file name (ignoring extension) and same directory as for
+	// this file. Files are filled into 'otherFiles' array, 'this' file is not included.
+	void FindOtherFiles(TArray<const CGameFileInfo*>& files) const;
+
+	// Open the file
 	FArchive* CreateReader() const;
+
+	// Filename stuff
 
 	const char* GetExtension() const
 	{
-		return Extension;
+		return ShortFilename + ExtensionOffset;
 	}
 
 	// Get full name of the file
 	void GetRelativeName(FString& OutName) const;
 	FString GetRelativeName() const;
-	// Get file path and name without extension
-	void GetRelativeNameNoExt(FString& OutName) const;
-	// Get file name with extension with no path
+	// Get file name with extension but without path
 	void GetCleanName(FString& OutName) const;
 	// Get path part of the name
-	void GetPath(FString& OutName) const;
-
-	static int CompareNames(const CGameFileInfo& A, const CGameFileInfo& B)
+	const FString& GetPath() const
 	{
-		return stricmp(A.RelativeName, B.RelativeName);
+		return GetPathByIndex(FolderIndex);
 	}
 
-	//?? todo: find why it is ever used, change name?
+	static const FString& GetPathByIndex(int index);
+	static int CompareNames(const CGameFileInfo& A, const CGameFileInfo& B);
+
+	// Update information about the file when it exists in multiple pak files (e.g. patched)
 	void UpdateFrom(const CGameFileInfo* other)
 	{
 		// Copy information from 'other' entry, but preserve hash chains
@@ -157,15 +168,37 @@ public:
 		memcpy(this, other, sizeof(CGameFileInfo));
 		HashNext = saveHash;
 	}
+
+private:
+	// Hide constructor to prevent allocation outside of file system code
+	FORCEINLINE CGameFileInfo() {}
+	FORCEINLINE ~CGameFileInfo() {}
 };
 
 extern int GNumPackageFiles;
 extern int GNumForeignFiles;
 
-// Ext = NULL -> use any package extension
-// Filename can contain extension, but should not contain path.
-// This function is quite fast because it uses hash tables.
-const CGameFileInfo *appFindGameFile(const char *Filename, const char *Ext = NULL);
+// Find folder in registered folders list. Returns -1 if not found.
+int appGetGameFolderIndex(const char* FolderName);
+
+int appGetGameFolderCount();
+
+typedef bool (*EnumGameFoldersCallback_t)(const FString&, int, void*);
+void appEnumGameFoldersWorker(EnumGameFoldersCallback_t, void *Param = NULL);
+
+// Callback with number of files plus custom parameter
+template<typename T>
+FORCEINLINE void appEnumGameFolders(bool (*Callback)(const FString&, int, T&), T& Param)
+{
+	appEnumGameFoldersWorker((EnumGameFoldersCallback_t)Callback, &Param);
+}
+
+// Callback with number of files in folder
+FORCEINLINE void appEnumGameFolders(bool (*Callback)(const FString&, int))
+{
+	appEnumGameFoldersWorker((EnumGameFoldersCallback_t)Callback, NULL);
+}
+
 // This function allows wildcard use in Filename. When wildcard is used, it iterates over all
 // found files and could be relatively slow.
 void appFindGameFiles(const char *Filename, TArray<const CGameFileInfo*>& Files);
@@ -259,7 +292,7 @@ public:
 		return !operator==(String);
 	}
 
-	FORCEINLINE const char *operator*() const
+	FORCEINLINE const char* operator*() const
 	{
 		return Str;
 	}
@@ -289,7 +322,7 @@ public:
 	Some enums used to distinguish game, engine and platform
 -----------------------------------------------------------------------------*/
 
-#define GAME_UE4(x)				(GAME_UE4_BASE + (x << 4))
+#define GAME_UE4(x)				(GAME_UE4_BASE + ((x) << 4))
 #define GAME_UE4_GET_MINOR(x)	((x - GAME_UE4_BASE) >> 4)	// reverse operation for GAME_UE4(x)
 
 enum EGame
@@ -383,6 +416,7 @@ enum EGame
 		GAME_PLA,
 		GAME_AliensCM,
 		GAME_GoWJ,
+		GAME_GoWU,
 		GAME_Bioshock3,
 		GAME_RememberMe,
 		GAME_MarvelHeroes,
@@ -416,10 +450,15 @@ enum EGame
 		// Add custom UE4 game engines here
 		// 4.5
 		GAME_Ark = GAME_UE4(5)+1,
+		// 4.6
+		GAME_FableLegends = GAME_UE4(6)+1,
 		// 4.8
 		GAME_HIT = GAME_UE4(8)+1,
+		// 4.10
+		GAME_SeaOfThieves = GAME_UE4(10)+1,
 		// 4.11
 		GAME_Gears4 = GAME_UE4(11)+1,
+		GAME_DaysGone = GAME_UE4(11)+2,
 		// 4.13
 		GAME_Lawbreakers = GAME_UE4(13)+1,
 		GAME_StateOfDecay2 = GAME_UE4(13)+2,
@@ -436,13 +475,16 @@ enum EGame
 		// 4.19
 		GAME_Paragon = GAME_UE4(19)+1,
 		// 4.20
-		GAME_Dauntless = GAME_UE4(20)+1,
-		GAME_Borderlands3 = GAME_UE4(20)+2,
+		GAME_Borderlands3 = GAME_UE4(20)+1,
+		// 4.21
+		GAME_Jedi = GAME_UE4(21)+1,
+		// 4.24
+		GAME_Dauntless = GAME_UE4(24)+1,
 
 	GAME_ENGINE    = 0xFFF0000	// mask for game engine
 };
 
-#define LATEST_SUPPORTED_UE4_VERSION		24		// UE4.XX
+#define LATEST_SUPPORTED_UE4_VERSION		26		// UE4.XX
 
 enum EPlatform
 {
@@ -655,6 +697,7 @@ public:
 	}
 };
 
+// Some typeinfo for FArchive types
 #define DECLARE_ARCHIVE(Class,Base)		\
 	typedef Class	ThisClass;			\
 	typedef Base	Super;				\
@@ -760,28 +803,26 @@ public:
 	FFileArchive(const char *Filename, unsigned InOptions);
 	virtual ~FFileArchive();
 
-	virtual void Seek(int Pos);
-	virtual void Seek64(int64 Pos);
-	virtual int Tell() const;
-	virtual int64 Tell64() const;
 	virtual int GetFileSize() const;
 //	virtual int64 GetFileSize64() const; -- implemented in derived classes
 
-	virtual bool IsEof() const;
 	virtual bool IsOpen() const;
 	virtual void Close();
+
+	const char* GetFileName() const
+	{
+		return FullName;
+	}
 
 protected:
 	FILE		*f;
 	unsigned	Options;
 	const char	*FullName;		// allocated with appStrdup
 	const char	*ShortName;		// points to FullName[N]
-	int64		FileSize;
 
 	byte*		Buffer;
 	int			BufferSize;
 	int64		BufferPos;		// position of Buffer in file
-	int64		ArPos64;
 	int64		FilePos;		// where 'f' position points to (when reading, it usually equals to 'BufferPos + BufferSize')
 
 	bool OpenFile();
@@ -809,7 +850,18 @@ public:
 
 	virtual void Serialize(void *data, int size);
 	virtual bool Open();
+	virtual void Seek(int Pos);
+	virtual void Seek64(int64 Pos);
+	virtual int Tell() const;
+	virtual int64 Tell64() const;
 	virtual int64 GetFileSize64() const;
+	virtual bool IsEof() const;
+
+protected:
+	int64		SeekPos;
+	int64		FileSize;
+	int			BufferBytesLeft;
+	int			LocalReadPos;
 };
 
 
@@ -823,11 +875,19 @@ public:
 	virtual void Serialize(void *data, int size);
 	virtual bool Open();
 	virtual void Close();
+	virtual void Seek(int Pos);
+	virtual void Seek64(int64 Pos);
+	virtual int Tell() const;
+	virtual int64 Tell64() const;
 	virtual int64 GetFileSize64() const;
+	virtual bool IsEof() const;
 
 	static void CleanupOnError();
 
 protected:
+	int64		FileSize;
+	int64		ArPos64;
+
 	void FlushBuffer();
 };
 
@@ -918,6 +978,7 @@ public:
 
 	virtual void Serialize(void *data, int size)
 	{
+		PROFILE_IF(size >= 1024);
 		guard(FMemReader::Serialize);
 		if (ArStopper > 0 && ArPos + size > ArStopper)
 			appError("Serializing behind stopper (%X+%X > %X)", ArPos, size, ArStopper);
@@ -928,6 +989,9 @@ public:
 		unguard;
 	}
 
+	// FMemReader doesn't have name table, so FName is serialized as a string
+	virtual FArchive& operator<<(FName& N);
+
 	virtual int GetFileSize() const
 	{
 		return DataSize;
@@ -936,6 +1000,41 @@ public:
 protected:
 	const byte *DataPtr;
 	int		DataSize;
+};
+
+class FMemWriter : public FArchive
+{
+	DECLARE_ARCHIVE(FMemReader, FArchive);
+public:
+	FMemWriter();
+	virtual ~FMemWriter();
+
+	virtual void Seek(int Pos);
+
+	virtual bool IsEof() const;
+
+	virtual void Serialize(void *data, int size);
+
+	virtual int GetFileSize() const;
+
+	const TArray<byte>& GetData() const
+	{
+		return *Data;
+	}
+
+protected:
+	TArray<byte>* Data;
+};
+
+// Dummy archive class
+class FDummyArchive : public FArchive
+{
+	DECLARE_ARCHIVE(FDummyArchive, FArchive);
+public:
+	virtual void Seek(int Pos)
+	{}
+	virtual void Serialize(void *data, int size)
+	{}
 };
 
 
@@ -963,8 +1062,9 @@ inline void DUMP_ARC_BYTES(FArchive &Ar, int NumBytes, const char* Label = NULL)
 	unguard;
 }
 
-inline void DUMP_MEM_BYTES(const void* Data, int NumBytes)
+inline void DUMP_MEM_BYTES(const void* Data, int NumBytes, const char* Label = NULL)
 {
+	if (Label) appPrintf("%s:", Label);
 	const byte* b = (byte*)Data;
 	for (int i = 0; i < NumBytes; i++)
 	{
@@ -993,6 +1093,27 @@ struct FVector
 		X = _X; Y = _Y; Z = _Z;
 	}
 
+	void Add(const FVector& Other)
+	{
+		X += Other.X;
+		Y += Other.Y;
+		Z += Other.Z;
+	}
+
+	void Subtract(const FVector& Other)
+	{
+		X -= Other.X;
+		Y -= Other.Y;
+		Z -= Other.Z;
+	}
+
+	void Scale(const FVector& Other)
+	{
+		X *= Other.X;
+		Y *= Other.Y;
+		Z *= Other.Z;
+	}
+
 	void Scale(float value)
 	{
 		X *= value; Y *= value; Z *= value;
@@ -1002,6 +1123,7 @@ struct FVector
 	{
 		Ar << V.X << V.Y << V.Z;
 #if ENDWAR
+		//todo: a single game influences ALL game's serialization speed!
 		if (Ar.Game == GAME_EndWar) Ar.Seek(Ar.Tell() + 4);	// skip W, at ArVer >= 290
 #endif
 		return Ar;
@@ -1164,22 +1286,6 @@ public:
 };
 
 
-struct FColor
-{
-	byte	R, G, B, A;
-
-	FColor()
-	{}
-	FColor(byte r, byte g, byte b, byte a = 255)
-	:	R(r), G(g), B(b), A(a)
-	{}
-	friend FArchive& operator<<(FArchive &Ar, FColor &C)
-	{
-		return Ar << C.R << C.G << C.B << C.A;
-	}
-};
-
-
 // UNREAL3
 struct FLinearColor
 {
@@ -1209,102 +1315,7 @@ struct FBoxSphereBounds
 };
 
 
-struct FPackedNormal
-{
-	uint32	Data;
-
-	friend FArchive& operator<<(FArchive &Ar, FPackedNormal &N)
-	{
-		Ar << N.Data;
 #if UNREAL4
-		if (Ar.Game >= GAME_UE4(20))
-		{
-			// UE4.20 no longer has offset, it uses conversion from int16 to float instead of uint16 to float
-			//?? TODO: possible const: FRenderingObjectVersion::IncreaseNormalPrecision
-			//?? TODO: review, may be use new PackedNormal format for UE code, it is compatible with CPackedNormal
-			//?? (will need to change CVT function for it)
-			N.Data ^= 0x80808080;
-		}
-#endif // UNREAL4
-		return Ar;
-	}
-
-	operator FVector() const
-	{
-		// "x / 127.5 - 1" comes from Common.usf, TangentBias() macro
-		FVector r;
-		r.X = ( Data        & 0xFF) / 127.5f - 1;
-		r.Y = ((Data >> 8 ) & 0xFF) / 127.5f - 1;
-		r.Z = ((Data >> 16) & 0xFF) / 127.5f - 1;
-		return r;
-	}
-
-	FPackedNormal &operator=(const FVector &V)
-	{
-		Data = int((V.X + 1) * 127.5f)
-			+ (int((V.Y + 1) * 127.5f) << 8)
-			+ (int((V.Z + 1) * 127.5f) << 16);
-		return *this;
-	}
-
-	FPackedNormal &operator=(const FVector4 &V)
-	{
-		Data = int((V.X + 1) * 127.5f)
-			+ (int((V.Y + 1) * 127.5f) << 8)
-			+ (int((V.Z + 1) * 127.5f) << 16)
-			+ (int((V.W + 1) * 127.5f) << 24);
-		return *this;
-	}
-
-	float GetW() const
-	{
-		return (Data >> 24) / 127.5f - 1;
-	}
-};
-
-float half2float(uint16 h);
-
-#if UNREAL4
-
-// Packed normal replacement, used since UE4.12 for high-precision reflections
-struct FPackedRGBA16N
-{
-	uint16	X, Y, Z, W;
-
-	FPackedNormal ToPackedNormal() const
-	{
-		FPackedNormal r;
-		FVector v = *this;		// conversion
-		r = v;					// conversion
-		return r;
-	}
-
-	operator FVector() const
-	{
-		FVector r;
-		r.X = (X - 32767.5f) / 32767.5f;
-		r.Y = (Y - 32767.5f) / 32767.5f;
-		r.Z = (Z - 32767.5f) / 32767.5f;
-		return r;
-	}
-
-	friend FArchive& operator<<(FArchive &Ar, FPackedRGBA16N &V)
-	{
-		Ar << V.X << V.Y << V.Z << V.W;
-		if (Ar.Game >= GAME_UE4(20))
-		{
-			// UE4.20 no longer has offset, it uses conversion from int16 to float instead of uint16 to float
-			//?? TODO: possible const: FRenderingObjectVersion::IncreaseNormalPrecision
-			//?? TODO: review, may be use new PackedNormal format for UE code, it is compatible with CPackedNormal
-			//?? (will need to change CVT function for it)
-			V.X ^= 0x8000;
-			V.Y ^= 0x8000;
-			V.Z ^= 0x8000;
-			V.W ^= 0x8000;
-		}
-		return Ar;
-	}
-};
 
 struct FIntPoint
 {
@@ -1349,6 +1360,8 @@ struct FTransform
 };
 
 #endif // UNREAL4
+
+float half2float(uint16 h);
 
 
 /*-----------------------------------------------------------------------------
@@ -1422,12 +1435,9 @@ SIMPLE_TYPE(FVector,  float)
 SIMPLE_TYPE(FVector4, float)
 SIMPLE_TYPE(FQuat,    float)
 SIMPLE_TYPE(FCoords,  float)
-SIMPLE_TYPE(FColor,   byte)
-//SIMPLE_TYPE(FPackedNormal, uint32) - has complex serialization
 
 #if UNREAL4
 
-//SIMPLE_TYPE(FPackedRGBA16N, uint16) - has complex serialization
 SIMPLE_TYPE(FIntPoint,  int)
 SIMPLE_TYPE(FIntVector, int)
 SIMPLE_TYPE(FVector2D,  float)
@@ -1462,7 +1472,7 @@ public:
 	{}
 	~FArray();
 
-	void MoveData(FArray& Other);
+	void MoveData(FArray& Other, int elementSize);
 
 	FORCEINLINE void *GetData()
 	{
@@ -1482,14 +1492,10 @@ public:
 	}
 	FORCEINLINE bool IsValidIndex(int index) const
 	{
-		return index >= 0 && index < DataCount;
+		return unsigned(index) < DataCount; // this will handle negative values as well
 	}
 
 	void RawCopy(const FArray &Src, int elementSize);
-
-	// serializers
-	FArchive& SerializeSimple(FArchive &Ar, int NumFields, int FieldSize);
-	FArchive& SerializeRaw(FArchive &Ar, void (*Serializer)(FArchive&, void*), int elementSize);
 
 protected:
 	void	*DataPtr;
@@ -1502,9 +1508,6 @@ protected:
 	{
 		return DataPtr == (void*)(this + 1);
 	}
-
-	// serializers
-	FArchive& Serialize(FArchive &Ar, void (*Serializer)(FArchive&, void*), int elementSize);
 
 	// clear array and resize to specific count
 	void Empty(int count, int elementSize);
@@ -1520,6 +1523,11 @@ protected:
 	void RemoveAtSwap(int index, int count, int elementSize);
 
 	void* GetItem(int index, int elementSize) const;
+
+	// serializers
+	FArchive& Serialize(FArchive &Ar, void (*Serializer)(FArchive&, void*), int elementSize);
+	FArchive& SerializeSimple(FArchive &Ar, int NumFields, int FieldSize);
+	FArchive& SerializeRaw(FArchive &Ar, void (*Serializer)(FArchive&, void*), int elementSize);
 };
 
 #if DECLARE_VIEWER_PROPS
@@ -1533,13 +1541,17 @@ FArchive& SerializeBulkArray(FArchive &Ar, FArray &Array, FArchive& (*Serializer
 #endif
 
 
+// Declare TArray serializer before TArray (part 1)
+template<typename T>
+FArchive& operator<<(FArchive& Ar, TArray<T>& A);
+
 // NOTE: this container cannot hold objects, required constructor/destructor
 // (at least, Add/Insert/Remove functions are not supported, but can serialize
 // such data)
 template<typename T>
 class TArray : public FArray
 {
-	friend class FString; // for rvalue
+	friend class FString; // for rvalue reference
 public:
 	TArray()
 	:	FArray()
@@ -1619,37 +1631,69 @@ public:
 			*((T*)DataPtr + i) = value;
 	}
 
+	void SetNum(int newCount)
+	{
+		int delta = newCount - DataCount;
+		if (delta > 0)
+		{
+			int index = AddUninitialized(delta);
+			Construct(index, delta);
+		}
+		else if (delta < 0)
+		{
+			RemoveAt(newCount, DataCount - newCount);
+		}
+	}
+
+	FORCEINLINE void SetNumUninitialized(int newCount)
+	{
+		int delta = newCount - DataCount;
+		if (delta > 0)
+		{
+			AddUninitialized(delta);
+		}
+		else if (delta < 0)
+		{
+			RemoveAt(newCount, DataCount - newCount);
+		}
+	}
+
+	FORCEINLINE int Add(T&& item)
+	{
+		int index = AddUninitialized(1);
+		new ((T*)DataPtr + index) T(MoveTemp(item));
+		return index;
+	}
 	FORCEINLINE int Add(const T& item)
 	{
-		int index = DataCount;
-		FArray::InsertUninitialized(index, 1, sizeof(T));
+		int index = AddUninitialized(1);
 		new ((T*)DataPtr + index) T(item);
 		return index;
 	}
 	FORCEINLINE int AddZeroed(int count = 1)
 	{
-		int index = DataCount;
-		FArray::InsertZeroed(index, count, sizeof(T));
+		int index = AddUninitialized(count);
+		memset((T*)DataPtr + index, 0, sizeof(T) * count);
 		return index;
 	}
 	FORCEINLINE int AddDefaulted(int count = 1)
 	{
-		int index = DataCount;
+		int index = AddUninitialized(count);
 		if (!TTypeInfo<T>::IsPod)
 		{
-			FArray::InsertUninitialized(index, count, sizeof(T));
 			Construct(index, count);
 		}
 		else
 		{
-			FArray::InsertZeroed(index, count, sizeof(T));
+			memset((T*)DataPtr + index, 0, sizeof(T) * count);
 		}
 		return index;
 	}
 	FORCEINLINE int AddUninitialized(int count = 1)
 	{
 		int index = DataCount;
-		FArray::InsertUninitialized(index, count, sizeof(T));
+		ResizeGrow(count);
+		DataCount += count;
 		return index;
 	}
 	FORCEINLINE int AddUnique(const T& item)
@@ -1762,7 +1806,9 @@ public:
 
 	FORCEINLINE void Sort(int (*cmpFunc)(const T&, const T&))
 	{
+		guard(TArray::Sort);
 		QSort<T>((T*)DataPtr, DataCount, cmpFunc);
+		unguard;
 	}
 
 	// Ranged for support
@@ -1771,32 +1817,8 @@ public:
 	FORCEINLINE friend T*       end  (      TArray& A) { return (T*) A.DataPtr + A.DataCount; }
 	FORCEINLINE friend const T* end  (const TArray& A) { return (const T*) A.DataPtr + A.DataCount; }
 
-	// serializer
-	friend FORCEINLINE FArchive& operator<<(FArchive &Ar, TArray &A)
-	{
-#if DO_GUARD_MAX
-		guardfunc;
-#endif
-		// special case for SIMPLE_TYPE
-		if (TTypeInfo<T>::IsSimpleType)
-		{
-			static_assert(sizeof(T) == TTypeInfo<T>::NumFields * TTypeInfo<T>::FieldSize, "Error in TTypeInfo");
-			return A.SerializeSimple(Ar, TTypeInfo<T>::NumFields, TTypeInfo<T>::FieldSize);
-		}
-
-		// special case for RAW_TYPE
-		if (TTypeInfo<T>::IsRawType)
-			return A.SerializeRaw(Ar, TArray<T>::SerializeItem, sizeof(T));
-
-		// generic case
-		// erase previous data before loading in a case of non-POD data
-		if (!TTypeInfo<T>::IsPod && Ar.IsLoading)
-			A.Destruct(0, A.Num());		// do not call Empty() - data will be freed anyway in FArray::Serialize()
-		return A.Serialize(Ar, TArray<T>::SerializeItem, sizeof(T));
-#if DO_GUARD_MAX
-		unguard;
-#endif
-	}
+	// Declare TArray serializer as "fiend" (part 2)
+	friend FArchive& operator<< <>(FArchive& Ar, TArray& A);
 
 #if UNREAL3
 	// Serialize an array, which file contents exactly matches in-memory contents.
@@ -1856,21 +1878,34 @@ protected:
 	// but allow rvalue copying - for FString
 	TArray(TArray&& Other)
 	{
-		MoveData(Other);
+		MoveData(Other, sizeof(T));
 	}
 	TArray& operator=(TArray&& Other)
 	{
 		Empty();
-		MoveData(Other);
+		MoveData(Other, sizeof(T));
 		return *this;
 	}
 
-	FORCEINLINE void ResizeTo(int count)
+	// Add 'count' uninitialized items. Same as 'ResizeTo', but only with growing possibility
+	// (makes code smaller)
+	FORCEINLINE void ResizeGrow(int count)
 	{
-		if (count > DataCount)
+		int NewCount = DataCount + count;
+		if (NewCount > MaxCount)
 		{
 			// grow array
-			FArray::GrowArray(count - DataCount, sizeof(T));
+			FArray::GrowArray(count, sizeof(T));
+		}
+	}
+
+	// Resize maximum capacity without adding new items
+	FORCEINLINE void ResizeTo(int count)
+	{
+		if (count > MaxCount)
+		{
+			// grow array
+			FArray::GrowArray(count - MaxCount, sizeof(T));
 		}
 		else if (count < DataCount)
 		{
@@ -1905,6 +1940,36 @@ protected:
 			((T*)DataPtr + index + i)->~T();
 	}
 };
+
+// Implementation of TArray serializer (part 3). Removing part 2 will cause some methods inaccessible.
+// Removing part 1 will cause function non-buildable. There's no problems when declaring serializer inside
+// TArray class, however this will not let us making custom TArray serializers for particular classes.
+template<typename T>
+FArchive& operator<<(FArchive& Ar, TArray<T>& A)
+{
+#if DO_GUARD_MAX
+	guardfunc;
+#endif
+	// special case for SIMPLE_TYPE
+	if (TTypeInfo<T>::IsSimpleType)
+	{
+		static_assert(sizeof(T) == TTypeInfo<T>::NumFields * TTypeInfo<T>::FieldSize, "Error in TTypeInfo");
+		return A.SerializeSimple(Ar, TTypeInfo<T>::NumFields, TTypeInfo<T>::FieldSize);
+	}
+
+	// special case for RAW_TYPE
+	if (TTypeInfo<T>::IsRawType)
+		return A.SerializeRaw(Ar, TArray<T>::SerializeItem, sizeof(T));
+
+	// generic case
+	// erase previous data before loading in a case of non-POD data
+	if (!TTypeInfo<T>::IsPod && Ar.IsLoading)
+		A.Destruct(0, A.Num());		// do not call Empty() - data will be freed anyway in FArray::Serialize()
+	return A.Serialize(Ar, TArray<T>::SerializeItem, sizeof(T));
+#if DO_GUARD_MAX
+	unguard;
+#endif
+}
 
 template<typename T>
 inline void Exchange(TArray<T>& A, TArray<T>& B)
@@ -1943,14 +2008,17 @@ protected:
 // Do not compile operator new when building UnCore.h inside a namespace.
 // More info: https://github.com/gildor2/UModel/pull/15/commits/3dc3096a6e81845a75024e060715b76bf345cd1b
 
-template<typename T>
+template<typename T, bool bCheck = true>
 FORCEINLINE void* operator new(size_t size, TArray<T> &Array)
 {
-	guard(TArray::operator new);
-	assert(size == sizeof(T)); // allocating wrong object? can't disallow allocating of "int" inside "TArray<FString>" at compile time ...
+	if (bCheck)
+	{
+		// allocating wrong object? can't disallow allocating of "int" inside "TArray<FString>" at compile time ...
+		if (size != sizeof(T))
+			appError("TArray::operator new: size mismatch");
+	}
 	int index = Array.AddUninitialized(1);
 	return Array.GetData() + index;
-	unguard;
 }
 
 #endif // UMODEL_LIB_IN_NAMESPACE
@@ -2141,8 +2209,8 @@ public:
 		return Data.Num() <= 1;
 	}
 
-	bool StartsWith(const char* Text);
-	bool EndsWith(const char* Text);
+	bool StartsWith(const char* Text) const;
+	bool EndsWith(const char* Text) const;
 	bool RemoveFromStart(const char* Text);
 	bool RemoveFromEnd(const char* Text);
 
@@ -2163,17 +2231,15 @@ public:
 
 	char& operator[](int index)
 	{
-		guard(FString::operator[]);
-		assert(index >= 0 && index < Data.Num());
+		if (unsigned(index >= Data.Num()))
+			appError("FString[%d/%d]", index, Data.Num());
 		return Data.GetData()[index];
-		unguardf("%d/%d", index, Data.Num());
 	}
 	const char& operator[](int index) const
 	{
-		guard(FString::operator[]);
-		assert(index >= 0 && index < Data.Num());
+		if (unsigned(index >= Data.Num()))
+			appError("FString[%d/%d]", index, Data.Num());
 		return Data.GetData()[index];
-		unguardf("%d/%d", index, Data.Num());
 	}
 
 	// convert string to char* - use "*Str"
@@ -2253,6 +2319,95 @@ public:
 protected:
 	char	StaticData[N];
 };
+
+// Helper class for quick case-insensitive comparison of the string pattern with
+// multiple other strings.
+struct FastNameComparer
+{
+	// Compare full string
+	FastNameComparer(const char* text)
+	{
+		len = strlen(text) + 1;
+		assert(len < ARRAY_COUNT(buf));
+		memcpy(buf, text, len);
+		dwords = len / 4;
+		chars = len % 4;
+	}
+
+	// Compare specified number of characters
+	FastNameComparer(const char* text, int lenToCompare)
+	{
+		len = lenToCompare;
+		assert(len < ARRAY_COUNT(buf));
+		memcpy(buf, text, len);
+		dwords = len / 4;
+		chars = len % 4;
+	}
+
+	bool operator() (const char* other) const
+	{
+		const uint32* a32 = (uint32*)buf;
+		const uint32* b32 = (uint32*)other;
+		for (int i = 0; i < dwords; i++, a32++, b32++)
+		{
+			if (((*a32 ^ *b32) & 0xdfdfdfdf) != 0) // 0xDF to ignore character case
+				return false;
+		}
+		const char* a8 = (char*)a32;
+		const char* b8 = (char*)b32;
+		for (int i = 0; i < chars; i++, a8++, b8++)
+			if (((*a8 ^ *b8) & 0xdf) != 0)
+				return false;
+		return true;
+	}
+
+protected:
+	char buf[256];	// can use FStaticString<256> instead
+	int len;
+	int dwords;
+	int chars;
+};
+
+
+/*-----------------------------------------------------------------------------
+	FColor
+-----------------------------------------------------------------------------*/
+
+struct FColor
+{
+	byte	R, G, B, A;
+
+	FColor()
+	{}
+	FColor(byte r, byte g, byte b, byte a = 255)
+	:	R(r), G(g), B(b), A(a)
+	{}
+	friend FArchive& operator<<(FArchive &Ar, FColor &C)
+	{
+		if (Ar.Game < GAME_UE3)
+			return Ar << C.R << C.G << C.B << C.A;
+		// Since UE3, FColor has different memory layout - BGRA.
+		return Ar << C.B << C.G << C.R << C.A;
+	}
+};
+
+// SIMPLE_TYPE(FColor, byte) - we could use this macro if FColor layout would be const, however it
+// differs between UE1-2 and UE3-4. For better performance, we're using custom TArray<FColor> serializer.
+
+template<>
+inline FArchive& operator<<(FArchive& Ar, TArray<FColor>& CA)
+{
+	CA.SerializeSimple(Ar, 4, 1);
+	if (Ar.Game >= GAME_UE3)
+	{
+		// Replace BGRA with RGBA
+		for (FColor& C : CA)
+		{
+			Exchange(C.R, C.B);
+		}
+	}
+	return Ar;
+}
 
 
 /*-----------------------------------------------------------------------------
@@ -2336,14 +2491,15 @@ void appReadCompressedChunk(FArchive &Ar, byte *Buffer, int Size, int Compressio
 //#define BULKDATA_Unused				0x0020		// the same value as for UE3
 #define BULKDATA_ForceInlinePayload		0x0040		// bulk data stored immediately after header
 #define BULKDATA_PayloadInSeperateFile	0x0100		// data stored in .ubulk file near the asset (UE4.12+)
-#define BULKDATA_SerializeCompressedBitWindow 0x0200 // use platform-specific compression
+#define BULKDATA_SerializeCompressedBitWindow 0x0200 // use platform-specific compression (deprecated, seems not used)
 #define BULKDATA_OptionalPayload		0x0800		// same as BULKDATA_PayloadInSeperateFile, but stored with .uptnl extension (UE4.20+)
+#define BULKDATA_Size64Bit				0x2000		// 64-bit size fields, UE4.22+
 
 #endif // UNREAL4
 
 struct FByteBulkData //?? separate FUntypedBulkData
 {
-	int32	BulkDataFlags;				// BULKDATA_...
+	uint32	BulkDataFlags;				// BULKDATA_...
 	int32	ElementCount;				// number of array elements
 	int64	BulkDataOffsetInFile;		// position in file, points to BulkData; 32-bit in UE3, 64-bit in UE4
 	int32	BulkDataSizeOnDisk;			// size of bulk data on disk
@@ -2434,15 +2590,18 @@ struct FIntBulkData : public FByteBulkData
 #define COMPRESS_LZO_ENC_BNS	8					// encrypted LZO
 #endif
 
-#if SMITE
-#define COMPRESS_LZO_ENC_SMITE	514					// encrypted LZO
-#endif
+#if UNREAL4
+#define COMPRESS_Custom		4						// UE4.20-4.21
+#endif // UNREAL4
 
+// Custom compression flags
+#define COMPRESS_FIND		0xFF					// use this flag for appDecompress when exact compression method is not known
 #if USE_LZ4
 #define COMPRESS_LZ4		0xFE					// custom umodel's constant
 #endif
-
-#define COMPRESS_FIND		0xFF					// use this flag for appDecompress when exact compression method is not known
+#if USE_OODLE
+#define COMPRESS_OODLE		0xFD					// custom umodel's constant
+#endif
 
 #define PKG_StoreCompressed	 0x02000000
 #define PKG_FilterEditorOnly 0x80000000
@@ -2472,513 +2631,10 @@ bool UE4EncryptedPak();
 
 #if UNREAL4
 
-// Unreal engine 4 versions, declared as enum to be able to see all revisions in a single place
-enum
-{
-	// Pre-release UE4 file versions
-	VER_UE4_ASSET_REGISTRY_TAGS = 112,
-	VER_UE4_TEXTURE_DERIVED_DATA2 = 124,
-	VER_UE4_ADD_COOKED_TO_TEXTURE2D = 125,
-	VER_UE4_REMOVED_STRIP_DATA = 130,
-	VER_UE4_REMOVE_EXTRA_SKELMESH_VERTEX_INFLUENCES = 134,
-	VER_UE4_TEXTURE_SOURCE_ART_REFACTOR = 143,
-	VER_UE4_ADD_SKELMESH_MESHTOIMPORTVERTEXMAP = 152,
-	VER_UE4_REMOVE_ARCHETYPE_INDEX_FROM_LINKER_TABLES = 163,
-	VER_UE4_REMOVE_NET_INDEX = 196,
-	VER_UE4_BULKDATA_AT_LARGE_OFFSETS = 198,
-	VER_UE4_SUMMARY_HAS_BULKDATA_OFFSET = 212,
-	VER_UE4_STATIC_MESH_STORE_NAV_COLLISION = 216,
-	VER_UE4_DEPRECATED_STATIC_MESH_THUMBNAIL_PROPERTIES_REMOVED = 242,
-	VER_UE4_APEX_CLOTH = 254,
-	VER_UE4_STATIC_SKELETAL_MESH_SERIALIZATION_FIX = 269,
-	VER_UE4_SUPPORT_32BIT_STATIC_MESH_INDICES = 277,
-	VER_UE4_APEX_CLOTH_LOD = 280,
-	VAR_UE4_ARRAY_PROPERTY_INNER_TAGS = 282, // note: here's a typo in UE4 code - "VAR_" instead of "VER_"
-	VER_UE4_KEEP_SKEL_MESH_INDEX_DATA = 283,
-	VER_UE4_MOVE_SKELETALMESH_SHADOWCASTING = 302,
-	VER_UE4_REFERENCE_SKELETON_REFACTOR = 310,
-	VER_UE4_FIXUP_ROOTBONE_PARENT = 312,
-	VER_UE4_FIX_ANIMATIONBASEPOSE_SERIALIZATION = 331,
-	VER_UE4_SUPPORT_8_BONE_INFLUENCES_SKELETAL_MESHES = 332,
-	VER_UE4_SUPPORT_GPUSKINNING_8_BONE_INFLUENCES = 334,
-	VER_UE4_ANIM_SUPPORT_NONUNIFORM_SCALE_ANIMATION = 335,
-	VER_UE4_ENGINE_VERSION_OBJECT = 336,
-	VER_UE4_SKELETON_GUID_SERIALIZATION = 338,
-	// UE4.0 source code was released on GitHub. Note: if we don't have any VER_UE4_...
-	// values between two VER_UE4_xx constants, for instance, between VER_UE4_0 and VER_UE4_1,
-	// it doesn't matter for this framework which version will be serialized serialized -
-	// 4.0 or 4.1, because 4.1 has nothing new for supported object formats compared to 4.0.
-	VER_UE4_0 = 342,
-		VER_UE4_MORPHTARGET_CPU_TANGENTZDELTA_FORMATCHANGE = 348,
-	VER_UE4_1 = 352,
-	VER_UE4_2 = 363,
-		VER_UE4_LOAD_FOR_EDITOR_GAME = 365,
-		VER_UE4_FTEXT_HISTORY = 368,					// used for UStaticMesh versioning
-		VER_UE4_STORE_BONE_EXPORT_NAMES = 370,
-	VER_UE4_3 = 382,
-		VER_UE4_ADD_STRING_ASSET_REFERENCES_MAP = 384,
-	VER_UE4_4 = 385,
-		VER_UE4_SKELETON_ADD_SMARTNAMES = 388,
-		VER_UE4_SOUND_COMPRESSION_TYPE_ADDED = 392,
-		VER_UE4_RENAME_CROUCHMOVESCHARACTERDOWN = 394,	// used for UStaticMesh versioning
-		VER_UE4_DEPRECATE_UMG_STYLE_ASSETS = 397,		// used for UStaticMesh versioning
-	VER_UE4_5 = 401,
-	VER_UE4_6 = 413,
-		VER_UE4_RENAME_WIDGET_VISIBILITY = 416,			// used for UStaticMesh versioning
-		VER_UE4_ANIMATION_ADD_TRACKCURVES = 417,
-	VER_UE4_7 = 434,
-		VER_UE4_STRUCT_GUID_IN_PROPERTY_TAG = 441,
-		VER_UE4_PACKAGE_SUMMARY_HAS_COMPATIBLE_ENGINE_VERSION = 444,
-	VER_UE4_8 = 451,
-		VER_UE4_SERIALIZE_TEXT_IN_PACKAGES = 459,
-	VER_UE4_9 = 482,
-	VER_UE4_10 = VER_UE4_9,								// exactly the same file version for 4.9 and 4.10
-		VER_UE4_COOKED_ASSETS_IN_EDITOR_SUPPORT = 485,
-		VER_UE4_SOUND_CONCURRENCY_PACKAGE = 489,		// used for UStaticMesh versioning
-	VER_UE4_11 = 498,
-		VER_UE4_INNER_ARRAY_TAG_INFO = 500,
-		VER_UE4_PROPERTY_GUID_IN_PROPERTY_TAG = 503,
-		VER_UE4_NAME_HASHES_SERIALIZED = 504,
-	VER_UE4_12 = 504,
-	VER_UE4_13 = 505,
-		VER_UE4_PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS = 507,
-		VER_UE4_TemplateIndex_IN_COOKED_EXPORTS = 508,
-	VER_UE4_14 = 508,
-		VER_UE4_PROPERTY_TAG_SET_MAP_SUPPORT = 509,
-		VER_UE4_ADDED_SEARCHABLE_NAMES = 510,
-	VER_UE4_15 = 510,
-		VER_UE4_64BIT_EXPORTMAP_SERIALSIZES = 511,
-	VER_UE4_16 = 513,
-	VER_UE4_17 = 513,
-		VER_UE4_ADDED_SOFT_OBJECT_PATH = 514,
-	VER_UE4_18 = 514,
-		VER_UE4_ADDED_PACKAGE_SUMMARY_LOCALIZATION_ID = 516,
-	VER_UE4_19 = 516,
-	VER_UE4_20 = 516,
-	VER_UE4_21 = 517,
-	VER_UE4_22 = 517,
-	VER_UE4_23 = 517,
-	VER_UE4_24 = 517,
-	// look for NEW_ENGINE_VERSION over the code to find places where version constants should be inserted.
-	// LATEST_SUPPORTED_UE4_VERSION should be updated too.
-};
-
-int GetUE4CustomVersion(const FArchive& Ar, const FGuid& Guid);
-
-struct FFrameworkObjectVersion
-{
-	enum Type
-	{
-		BeforeCustomVersionWasAdded = 0,
-		MoveCompressedAnimDataToTheDDC = 5,
-		// UE4.12 = 6
-		SmartNameRefactor = 7,
-		// UE4.13 = 12
-		RemoveSoundWaveCompressionName = 12,
-		// UE4.14 = 17
-		MoveCurveTypesToSkeleton = 15,
-		CacheDestructibleOverlaps = 16,
-		GeometryCacheMissingMaterials = 17,	// not needed now - for UGeometryCache
-		// UE4.15 = 22
-		// UE4.16 = 23
-		// UE4.17 = 28
-		// UE4.18 = 30
-		// UE4.19 = 33
-		// UE4.20, UE4.21 = 34
-		// UE4.22, UE4.23 = 35
-
-		VersionPlusOne,
-		LatestVersion = VersionPlusOne - 1
-	};
-
-	static Type Get(const FArchive& Ar)
-	{
-		static const FGuid GUID = { 0xCFFC743F, 0x43B04480, 0x939114DF, 0x171D2073 };
-		int ver = GetUE4CustomVersion(Ar, GUID);
-		if (ver >= 0)
-			return (Type)ver;
-
-#if TEKKEN7
-		if (Ar.Game == GAME_Tekken7) return (Type)14;		// pre-UE4.14
-#endif
-
-		if (Ar.Game < GAME_UE4(12))
-			return BeforeCustomVersionWasAdded;
-		if (Ar.Game < GAME_UE4(13))
-			return (Type)6;
-		if (Ar.Game < GAME_UE4(14))
-			return RemoveSoundWaveCompressionName;
-		if (Ar.Game < GAME_UE4(15))
-			return GeometryCacheMissingMaterials;
-		if (Ar.Game < GAME_UE4(16))
-			return (Type)22;
-		if (Ar.Game < GAME_UE4(17))
-			return (Type)23;
-		if (Ar.Game < GAME_UE4(18))
-			return (Type)28;
-		if (Ar.Game < GAME_UE4(19))
-			return (Type)30;
-		if (Ar.Game < GAME_UE4(20))
-			return (Type)33;
-		if (Ar.Game < GAME_UE4(22))
-			return (Type)34;
-		if (Ar.Game < GAME_UE4(24))
-			return (Type)35;
-		// NEW_ENGINE_VERSION
-		return LatestVersion;
-	}
-};
-
-struct FEditorObjectVersion
-{
-	enum Type
-	{
-		BeforeCustomVersionWasAdded = 0,
-		// UE4.12 = 2
-		// UE4.13 = 6
-		// UE4.14 = 8
-		RefactorMeshEditorMaterials = 8,
-		// UE4.15 = 14
-		UPropertryForMeshSection = 10,
-		// UE4.16 = 17
-		// UE4.17, UE4.18 = 20
-		// UE4.19 = 23
-		AddedMorphTargetSectionIndices = 23,
-		// UE4.20 = 24
-		// UE4.21 = 26
-		// UE4.22 = 30
-		StaticMeshDeprecatedRawMesh = 28,	//todo: editor mesh
-		// UE4.23 = 34
-
-		VersionPlusOne,
-		LatestVersion = VersionPlusOne - 1
-	};
-
-	static Type Get(const FArchive& Ar)
-	{
-		static const FGuid GUID = { 0xE4B068ED, 0xF49442E9, 0xA231DA0B, 0x2E46BB41 };
-		int ver = GetUE4CustomVersion(Ar, GUID);
-		if (ver >= 0)
-			return (Type)ver;
-
-#if TEKKEN7
-		if (Ar.Game == GAME_Tekken7) return (Type)7;		// pre-UE4.14
-#endif
-#if PARAGON
-		if (Ar.Game == GAME_Paragon) return  (Type)22;
-#endif
-
-		if (Ar.Game < GAME_UE4(12))
-			return BeforeCustomVersionWasAdded;
-		if (Ar.Game < GAME_UE4(13))
-			return (Type)2;
-		if (Ar.Game < GAME_UE4(14))
-			return (Type)6;
-		if (Ar.Game < GAME_UE4(15))
-			return RefactorMeshEditorMaterials;
-		if (Ar.Game < GAME_UE4(16))
-			return (Type)14;
-		if (Ar.Game < GAME_UE4(17))
-			return (Type)17;
-		if (Ar.Game < GAME_UE4(19))
-			return (Type)20;
-		if (Ar.Game < GAME_UE4(20))
-			return AddedMorphTargetSectionIndices;
-		if (Ar.Game < GAME_UE4(21))
-			return (Type)24;
-		if (Ar.Game < GAME_UE4(22))
-			return (Type)26;
-		if (Ar.Game < GAME_UE4(23))
-			return (Type)30;
-		if (Ar.Game < GAME_UE4(24))
-			return (Type)34;
-		// NEW_ENGINE_VERSION
-		return LatestVersion;
-	}
-};
-
-struct FSkeletalMeshCustomVersion
-{
-	enum Type
-	{
-		BeforeCustomVersionWasAdded = 0,
-		// UE4.13 = 4
-		CombineSectionWithChunk = 1,
-		CombineSoftAndRigidVerts = 2,
-		RecalcMaxBoneInfluences = 3,
-		SaveNumVertices = 4,
-		// UE4.14 = 5
-		// UE4.15 = 7
-		UseSharedColorBufferFormat = 6,		// separate vertex stream for vertex influences
-		UseSeparateSkinWeightBuffer = 7,	// use FColorVertexStream for both static and skeletal meshes
-		// UE4.16, UE4.17 = 9
-		NewClothingSystemAdded = 8,
-		// UE4.18 = 10
-		CompactClothVertexBuffer = 10,
-		// UE4.19 = 15
-		RemoveSourceData = 11,
-		SplitModelAndRenderData = 12,
-		RemoveTriangleSorting = 13,
-		RemoveDuplicatedClothingSections = 14,
-		DeprecateSectionDisabledFlag = 15,
-		// UE4.20-UE4.22 = 16
-		SectionIgnoreByReduceAdded = 16,
-		// UE4.23 = 17
-		SkinWeightProfiles = 17, //todo: FSkeletalMeshLODModel::Serialize (editor mesh)
-
-		VersionPlusOne,
-		LatestVersion = VersionPlusOne - 1
-	};
-
-	static Type Get(const FArchive& Ar)
-	{
-		static const FGuid GUID = { 0xD78A4A00, 0xE8584697, 0xBAA819B5, 0x487D46B4 };
-		int ver = GetUE4CustomVersion(Ar, GUID);
-		if (ver >= 0)
-			return (Type)ver;
-#if PARAGON
-		if (Ar.Game == GAME_Paragon) return (Type)12;
-#endif
-#if UT4
-		if (Ar.Game == GAME_UT4) return (Type)5;
-#endif
-
-		if (Ar.Game < GAME_UE4(13))
-			return BeforeCustomVersionWasAdded;
-		if (Ar.Game < GAME_UE4(14))
-			return SaveNumVertices;
-		if (Ar.Game < GAME_UE4(15))
-			return (Type)5;
-		if (Ar.Game < GAME_UE4(16))
-			return UseSeparateSkinWeightBuffer;
-		if (Ar.Game < GAME_UE4(18)) // 4.16 and 4.17
-			return (Type)9;
-		if (Ar.Game < GAME_UE4(19))
-			return CompactClothVertexBuffer;
-		if (Ar.Game < GAME_UE4(20))
-			return DeprecateSectionDisabledFlag;
-		if (Ar.Game < GAME_UE4(23))
-			return SectionIgnoreByReduceAdded;
-		if (Ar.Game < GAME_UE4(24))
-			return SkinWeightProfiles;
-		// NEW_ENGINE_VERSION
-		return LatestVersion;
-	}
-};
-
-struct FCoreObjectVersion
-{
-	enum Type
-	{
-		BeforeCustomVersionWasAdded = 0,
-
-		// UE4.12-UE4.14 = 1
-		// UE4.15-UE4.21 = 2
-		// UE4.22, UE4.23 = 3
-		SkeletalMaterialEditorDataStripping = 3,
-
-		VersionPlusOne,
-		LatestVersion = VersionPlusOne - 1
-	};
-
-	static Type Get(const FArchive& Ar)
-	{
-		static const FGuid GUID = { 0x375EC13C, 0x06E448FB, 0xB50084F0, 0x262A717E };
-		int ver = GetUE4CustomVersion(Ar, GUID);
-		if (ver >= 0)
-			return (Type)ver;
-		if (Ar.Game < GAME_UE4(12))
-			return BeforeCustomVersionWasAdded;
-		if (Ar.Game < GAME_UE4(15))
-			return (Type)1;
-		if (Ar.Game < GAME_UE4(22))
-			return (Type)2;
-		if (Ar.Game < GAME_UE4(24))
-			return SkeletalMaterialEditorDataStripping;
-		// NEW_ENGINE_VERSION
-		return LatestVersion;
-	}
-};
-
-struct FRenderingObjectVersion
-{
-	enum Type
-	{
-		BeforeCustomVersionWasAdded = 0,
-		// UE4.14 = 4
-		// UE4.15 = 12
-		TextureStreamingMeshUVChannelData = 10,
-		// UE4.16 = 15
-		// UE4.17 = 19
-		// UE4.18 = 20
-		// UE4.19 = 25
-		// UE4.20 = 26
-		IncreaseNormalPrecision = 26,
-		// UE4.21 = 27
-		// UE4.22 = 28
-		// UE4.23 = 31
-
-		VersionPlusOne,
-		LatestVersion = VersionPlusOne - 1
-	};
-
-	static Type Get(const FArchive& Ar)
-	{
-		static const FGuid GUID = { 0x12F88B9F, 0x88754AFC, 0xA67CD90C, 0x383ABD29 };
-		int ver = GetUE4CustomVersion(Ar, GUID);
-		if (ver >= 0)
-			return (Type)ver;
-
-#if TEKKEN7
-		if (Ar.Game == GAME_Tekken7) return (Type)9;		// pre-UE4.14
-#endif
-
-		if (Ar.Game < GAME_UE4(12))
-			return BeforeCustomVersionWasAdded;
-		if (Ar.Game < GAME_UE4(13))
-			return (Type)2;
-		if (Ar.Game < GAME_UE4(14))
-			return (Type)4;
-		if (Ar.Game < GAME_UE4(16))	// 4.14 and 4.15
-			return (Type)12;
-		if (Ar.Game < GAME_UE4(17))
-			return (Type)15;
-		if (Ar.Game < GAME_UE4(18))
-			return (Type)19;
-		if (Ar.Game < GAME_UE4(19))
-			return (Type)20;
-		if (Ar.Game < GAME_UE4(20))
-			return (Type)25;
-		if (Ar.Game < GAME_UE4(21))
-			return IncreaseNormalPrecision;
-		if (Ar.Game < GAME_UE4(22))
-			return (Type)27;
-		if (Ar.Game < GAME_UE4(23))
-			return (Type)28;
-		if (Ar.Game < GAME_UE4(24))
-			return (Type)31;
-		// NEW_ENGINE_VERSION
-		return LatestVersion;
-	}
-};
-
-struct FAnimObjectVersion
-{
-	enum Type
-	{
-		BeforeCustomVersionWasAdded = 0,
-		// UE4.21-UE4.23 = 2
-		StoreMarkerNamesOnSkeleton = 2,
-
-		VersionPlusOne,
-		LatestVersion = VersionPlusOne - 1
-	};
-
-	static Type Get(const FArchive& Ar)
-	{
-		static const FGuid GUID = { 0xAF43A65D, 0x7FD34947, 0x98733E8E, 0xD9C1BB05 };
-		int ver = GetUE4CustomVersion(Ar, GUID);
-		if (ver >= 0)
-			return (Type)ver;
-		if (Ar.Game < GAME_UE4(21))
-			return BeforeCustomVersionWasAdded;
-		if (Ar.Game < GAME_UE4(24))
-			return StoreMarkerNamesOnSkeleton;
-		// NEW_ENGINE_VERSION
-		return LatestVersion;
-	}
-};
-
-struct FAnimPhysObjectVersion
-{
-	enum Type
-	{
-		BeforeCustomVersionWasAdded = 0,
-		// UE4.16 = 3
-		RemoveUIDFromSmartNameSerialize = 5,
-		// UE4.17 = 7
-		SmartNameRefactorForDeterministicCooking = 10,
-		// UE4.18 = 12
-		AddLODToCurveMetaData = 12,
-		// UE4.19 = 16
-		ChangeRetargetSourceReferenceToSoftObjectPtr = 15,
-		// UE4.20-UE4.23 = 17
-
-		VersionPlusOne,
-		LatestVersion = VersionPlusOne - 1
-	};
-
-	static Type Get(const FArchive& Ar)
-	{
-		static const FGuid GUID = { 0x29E575DD, 0xE0A34627, 0x9D10D276, 0x232CDCEA };
-		int ver = GetUE4CustomVersion(Ar, GUID);
-		if (ver >= 0)
-			return (Type)ver;
-		if (Ar.Game < GAME_UE4(16))
-			return BeforeCustomVersionWasAdded;
-		if (Ar.Game < GAME_UE4(17))
-			return (Type)3;
-		if (Ar.Game < GAME_UE4(18))
-			return (Type)7;
-		if (Ar.Game < GAME_UE4(19))
-			return AddLODToCurveMetaData;
-		if (Ar.Game < GAME_UE4(20))
-			return (Type)16;
-		if (Ar.Game < GAME_UE4(24))
-			return (Type)17;
-		// NEW_ENGINE_VERSION
-		return LatestVersion;
-	}
-};
-
-struct FReleaseObjectVersion
-{
-	enum Type
-	{
-		BeforeCustomVersionWasAdded = 0,
-		AddSkeletalMeshSectionDisable = 12,
-
-		VersionPlusOne,
-		LatestVersion = VersionPlusOne - 1
-	};
-
-	static Type Get(const FArchive& Ar)
-	{
-		static const FGuid GUID = { 0x9C54D522, 0xA8264FBE, 0x94210746, 0x61B482D0 };
-		int ver = GetUE4CustomVersion(Ar, GUID);
-		if (ver >= 0)
-			return (Type)ver;
-		if (Ar.Game < GAME_UE4(11))
-			return BeforeCustomVersionWasAdded;
-		if (Ar.Game < GAME_UE4(13))
-			return (Type)1;
-		if (Ar.Game < GAME_UE4(14))
-			return (Type)3;
-		if (Ar.Game < GAME_UE4(15))
-			return (Type)4;
-		if (Ar.Game < GAME_UE4(16))
-			return (Type)7;
-		if (Ar.Game < GAME_UE4(17))
-			return (Type)9;
-		if (Ar.Game < GAME_UE4(19))
-			return (Type)10;
-		if (Ar.Game < GAME_UE4(20))
-			return AddSkeletalMeshSectionDisable;
-		if (Ar.Game < GAME_UE4(21))
-			return (Type)17;
-		if (Ar.Game < GAME_UE4(23))
-			return (Type)20;
-		if (Ar.Game < GAME_UE4(24))
-			return (Type)23;
-		// NEW_ENGINE_VERSION
-		return LatestVersion;
-	}
-};
-
 class FStripDataFlags
 {
 public:
-	FStripDataFlags(FArchive& Ar, int MinVersion = VER_UE4_REMOVED_STRIP_DATA)
+	FStripDataFlags(FArchive& Ar, int MinVersion = 130 /*VER_UE4_REMOVED_STRIP_DATA*/)
 	{
 		if (Ar.ArVer >= MinVersion)
 		{
@@ -3016,11 +2672,11 @@ protected:
 	Global variables
 -----------------------------------------------------------------------------*/
 
-extern FArchive *GDummySave;
+extern bool      GExportInProgress; // indicates that batch export is in progress, and exporter may destroy data when done
 extern int       GForceGame;
 extern int       GForcePackageVersion;
 extern byte      GForcePlatform;
-extern byte      GForceCompMethod;
+extern byte      GForceCompMethod;	// compression method for UE3 fully compressed packages
 
 
 /*-----------------------------------------------------------------------------

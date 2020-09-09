@@ -1,6 +1,7 @@
 #ifndef __UNSOUND_H__
 #define __UNSOUND_H__
 
+#include "UE4Version.h"
 
 class USound : public UObject
 {
@@ -37,6 +38,8 @@ public:
 	FByteBulkData		CompressedPCData;
 	FByteBulkData		CompressedXbox360Data;
 	FByteBulkData		CompressedPS3Data;
+	FByteBulkData		CompressedWiiUData;
+	FByteBulkData		CompressedIPhoneData;
 
 	void Serialize(FArchive &Ar)
 	{
@@ -51,10 +54,23 @@ public:
 			return;
 		}
 #endif
-		CompressedPCData.Serialize(Ar);
-		if (Ar.Tell() == Ar.GetStopper()) return; // Sudden Attack 2 has only 2 bulks
-		CompressedXbox360Data.Serialize(Ar);
-		CompressedPS3Data.Serialize(Ar);
+
+		// We're just checking for end of object data, not checking the ArVer here.
+		// The original USoundNodeWave::Serialize just have a few FByteBulkData serialize calls,
+		// without any other field types. So we can simply process everything as a single array.
+		FByteBulkData* Bulks[] = {
+			&CompressedPCData,
+			&CompressedXbox360Data,
+			&CompressedPS3Data,
+			&CompressedWiiUData,		// appeared in ArVer 845
+			&CompressedIPhoneData,		// appeared in ArVer 851
+		};
+
+		for (FByteBulkData* Bulk : Bulks)
+		{
+			if (Ar.Tell() == Ar.GetStopper()) return; // no more data in this object
+			Bulk->Serialize(Ar);
+		}
 
 		// some hack to support more games ...
 		if (Ar.Tell() < Ar.GetStopper())

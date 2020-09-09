@@ -1,11 +1,13 @@
 #include "Core.h"
-#include "UnrealClasses.h"
+#include "UnCore.h"
 #include "MathSSE.h"			// for CVec4
 
 #if RENDERING
 
-#include "UnMaterial2.h"
-#include "UnMaterial3.h"
+#include "UnObject.h"
+#include "UnrealMaterial/UnMaterial.h"
+#include "UnrealMaterial/UnMaterial2.h"
+#include "UnrealMaterial/UnMaterial3.h"
 
 #include "ObjectViewer.h"
 
@@ -17,14 +19,12 @@ bool CMaterialViewer::ShowOutline = false;
 bool CMaterialViewer::ShowChannels = false;
 int CMaterialViewer::ShapeIndex = 0;
 
-static void OutlineMaterial(UObject *Obj, int indent = 0);
-
 
 /*-----------------------------------------------------------------------------
 	Main code
 -----------------------------------------------------------------------------*/
 
-void CMaterialViewer::ProcessKey(int key)
+void CMaterialViewer::ProcessKey(unsigned key)
 {
 	guard(CObjectViewer::ProcessKey);
 	switch (key)
@@ -523,17 +523,17 @@ static int textIndent, prevIndent;
 static bool levelFinished[256];
 #endif
 
-static void Outline(const char *fmt, ...)
+static bool Outline(const char *fmt, ...)
 {
 	char buf[1024];
 	int offset = 0;
-//	buf[offset++] = textIndent + '0'; buf[offset++] = ':';	//??
-//	buf[offset++] = prevIndent + '0'; buf[offset++] = ':';	//??
+
 #if !NEW_OUTLINE
 	buf[offset++] = '^'; buf[offset++] = '1';	// S_RED
 #else
 	buf[offset++] = '^'; buf[offset++] = '6';	// S_CYAN
 #endif
+
 	for (int level = 0; level < textIndent; level++)
 	{
 #if !NEW_OUTLINE
@@ -584,7 +584,13 @@ static void Outline(const char *fmt, ...)
 	vsnprintf(buf + offset, ARRAY_COUNT(buf) - offset, fmt, argptr);
 	va_end(argptr);
 
-	DrawTextLeft("%s", buf);
+	bool bClicked = false;
+	if (strchr(fmt, S_HYPER_START) == NULL)
+		DrawTextLeft("%s", buf);				// not a link
+	else
+		bClicked = DrawTextLeftH(NULL, "%s", buf); // link
+
+	return bClicked;
 }
 
 
@@ -607,11 +613,16 @@ inline void InitProps(bool firstLevel)
 	}
 }
 
-inline void FlushProps()
+void CMaterialViewer::FlushProps()
 {
+	guard(CMaterialViewer::FlushProps);
+
 	// print ordinary props
 	if (propBuf[0])
+	{
+		Outline("---"); // separator between parameter values and properties
 		Outline("%s", propBuf);
+	}
 	// print material links, links[] array may be modified while printing!
 	int savedFirstLink = firstLink;
 	int lastLink = firstLink + numLinks;
@@ -654,6 +665,8 @@ inline void FlushProps()
 	}
 	// restore data
 	firstLink = savedFirstLink;
+
+	unguard;
 }
 
 static void Prop(bool value, const char *name)
@@ -677,13 +690,15 @@ static void Prop(UUnrealMaterial *value, const char *name)
 static void PropEnum(int value, const char *name, const char *EnumName)
 {
 	const char *n = EnumToName(EnumName, value);
-	Outline("%s = %s (%d)", name, n ? n : "???", value);
+	char buf[256];
+	appSprintf(ARRAY_ARG(buf), "%s = %s (%d)", name, n ? n : "???", value);
+	appStrcatn(ARRAY_ARG(propBuf), buf);
 }
 
 
-static void OutlineMaterial(UObject *Obj, int indent)
+void CMaterialViewer::OutlineMaterial(UObject *Obj, int indent)
 {
-	guard(OutlineMaterial);
+	guard(CMaterialViewer::OutlineMaterial);
 	assert(Obj);
 	int i;
 
@@ -691,7 +706,17 @@ static void OutlineMaterial(UObject *Obj, int indent)
 	int oldIndent = textIndent;
 	textIndent = indent;
 
-	Outline(S_RED "%s'%s'", Obj->GetClassName(), Obj->Name);
+	bool bHyperlink = indent != 0;
+	if (!bHyperlink)
+	{
+		Outline(S_RED "%s'%s'", Obj->GetClassName(), Obj->Name);
+	}
+	else
+	{
+		bool bClicked = Outline(S_RED S_HYPERLINK("%s'%s'"), Obj->GetClassName(), Obj->Name);
+		if (bClicked)
+			JumpTo(Obj);
+	}
 
 #define MAT_BEGIN(ClassName)	\
 	if (Obj->IsA(#ClassName+1)) \
@@ -767,32 +792,63 @@ static void OutlineMaterial(UObject *Obj, int indent)
 		{
 			const UTexture3 *Tex = Mat->ReferencedTextures[i];
 			if (!Tex) continue;
-			Outline("Textures[%d] = %s", i, Tex->Name);
+			if (Outline("Textures[%d] = " S_HYPERLINK("%s"), i, Tex->Name))
+				JumpTo(Tex);
+		}
+		// texture parameters
+		if (Mat->CollectedTextureParameters.Num())
+		{
+			Outline(S_YELLOW"Texture parameters:");
+			for (const CTextureParameterValue &P : Mat->CollectedTextureParameters)
+				if (Outline("%s = " S_HYPERLINK("%s"), *P.Name, P.Texture ? P.Texture->Name : "NULL"))
+					JumpTo(P.Texture);
+		}
+		// scalar
+		if (Mat->CollectedScalarParameters.Num())
+		{
+			Outline(S_YELLOW"Scalar parameters:");
+			for (const CScalarParameterValue &P : Mat->CollectedScalarParameters)
+				Outline("%s = %g", *P.Name, P.Value);
+		}
+		// vector
+		if (Mat->CollectedVectorParameters.Num())
+		{
+			Outline(S_YELLOW"Vector parameters:");
+			for (const CVectorParameterValue &P : Mat->CollectedVectorParameters)
+				Outline("%s = %g %g %g %g", *P.Name, FCOLOR_ARG(P.Value));
 		}
 	MAT_END
 
 	MAT_BEGIN(UMaterialInstanceConstant)
-		PROP(Parent)
-		// texture
-		if (Mat->TextureParameterValues.Num()) Outline(S_YELLOW"Texture parameters:");
-		for (i = 0; i < Mat->TextureParameterValues.Num(); i++)
+		if (Mat->Parent != Mat)
 		{
-			const FTextureParameterValue &P = Mat->TextureParameterValues[i];
-			Outline("%s = %s", P.GetName(), P.ParameterValue ? P.ParameterValue->Name : "NULL");
+			PROP(Parent)
+		}
+		else
+		{
+			Outline(S_RED"Parent = SELF");
+		}
+		// texture
+		if (Mat->TextureParameterValues.Num())
+		{
+			Outline(S_YELLOW"Texture parameters:");
+			for (const FTextureParameterValue &P : Mat->TextureParameterValues)
+				if (Outline("%s = " S_HYPERLINK("%s"), P.GetName(), P.ParameterValue ? P.ParameterValue->Name : "NULL"))
+					JumpTo(P.ParameterValue);
 		}
 		// scalar
-		if (Mat->ScalarParameterValues.Num()) Outline(S_YELLOW"Scalar parameters");
-		for (i = 0; i < Mat->ScalarParameterValues.Num(); i++)
+		if (Mat->ScalarParameterValues.Num())
 		{
-			const FScalarParameterValue &P = Mat->ScalarParameterValues[i];
-			Outline("%s = %g", P.GetName(), P.ParameterValue);
+			Outline(S_YELLOW"Scalar parameters");
+			for (const FScalarParameterValue &P : Mat->ScalarParameterValues)
+				Outline("%s = %g", P.GetName(), P.ParameterValue);
 		}
 		// vector
-		if (Mat->VectorParameterValues.Num()) Outline(S_YELLOW"Vector parameters");
-		for (i = 0; i < Mat->VectorParameterValues.Num(); i++)
+		if (Mat->VectorParameterValues.Num())
 		{
-			const FVectorParameterValue &P = Mat->VectorParameterValues[i];
-			Outline("%s = %g %g %g %g", P.GetName(), FCOLOR_ARG(P.ParameterValue));
+			Outline(S_YELLOW"Vector parameters");
+			for (const FVectorParameterValue &P : Mat->VectorParameterValues)
+				Outline("%s = %g %g %g %g", P.GetName(), FCOLOR_ARG(P.ParameterValue));
 		}
 	MAT_END
 #endif // UNREAL3

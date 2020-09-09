@@ -133,6 +133,7 @@
 #define DEVILS_THIRD	1		// Devil's Third
 #define ROCKET_LEAGUE	1		// Rocket League
 #define GRAV			1
+#define GEARSU			1		// Gears of War: Ultimate
 //#define USE_XDK			1		// use some proprietary code for XBox360 support
 
 // Midway UE3 games -- make common define ??
@@ -150,6 +151,7 @@
 #if UNREAL4
 
 #define GEARS4			1		// Gears of War 4
+#define DAYSGONE		1		// Days Gone
 #define TEKKEN7			1		// Tekken 7
 #define LAWBREAKERS		1		// Lawbreakers
 #define SOD2			1		// State of Decay 2
@@ -163,13 +165,19 @@
 #define ASC_ONE			1		// Ascendant One
 #define BORDERLANDS3	1		// Borderlands 3
 #define KH3				1		// Kingdom Hearts 3
+#define JEDI			1		// Star Wars Jedi: Fallen Order
+#define SEAOFTHIEVES	1		// Sea of Thieves
 
 #define SPECIAL_TAGS	1		// games with different PACKAGE_FILE_TAG
 
 #endif // UNREAL4
 
-#if GEARS4 || BATMAN
+#if GEARS4 || BATMAN || UNREAL4
 #define USE_LZ4			1		// LZ4 compression
+#endif
+
+#if SMITE || UNREAL4
+#define USE_OODLE		1		// Oodle compression
 #endif
 
 #endif // __GAME_DEFINES_H__

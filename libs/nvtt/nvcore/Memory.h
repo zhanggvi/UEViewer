@@ -18,7 +18,7 @@
 
 
 #if UMODEL
-void* appMalloc(int size, int alignment = 8);
+void* appMalloc(int size, int alignment = 8, bool noInit = false);
 void* appRealloc(void *ptr, int newSize);
 void appFree(void *ptr);
 #endif
@@ -31,11 +31,11 @@ namespace nv
 #if UMODEL
 		FORCEINLINE void * malloc(size_t size)
 		{
-			return appMalloc(size);
+			return appMalloc(size, 8, true);
 		}
 		FORCEINLINE void * malloc(size_t size, const char * file, int line)
 		{
-			return appMalloc(size);
+			return appMalloc(size, 8, true);
 		}
 		FORCEINLINE void free(const void * ptr)
 		{
@@ -43,7 +43,7 @@ namespace nv
 		}
 		FORCEINLINE void * realloc(void * ptr, size_t size)
 		{
-			appRealloc(ptr, size);
+			return appRealloc(ptr, size);
 		}
 #else
 		NVCORE_API void * malloc(size_t size);
@@ -60,16 +60,16 @@ namespace nv
 
 // Override new/delete
 
-FORCEINLINE void * operator new (size_t size) throw()
+FORCEINLINE void * operator new (size_t size) //throw()
 {
 #if UMODEL
-	return appMalloc(size);
+	return appMalloc(size, 8, true);
 #else
 	return nv::mem::malloc(size);
 #endif
 }
 
-FORCEINLINE void operator delete (void *p) throw()
+FORCEINLINE void operator delete (void *p) //throw()
 {
 #if UMODEL
 	return appFree(p);
@@ -78,16 +78,16 @@ FORCEINLINE void operator delete (void *p) throw()
 #endif
 }
 
-FORCEINLINE void * operator new [] (size_t size) throw()
+FORCEINLINE void * operator new [] (size_t size) //throw()
 {
 #if UMODEL
-	return appMalloc(size);
+	return appMalloc(size, 8, true);
 #else
 	return nv::mem::malloc(size);
 #endif
 }
 
-FORCEINLINE void operator delete [] (void * p) throw()
+FORCEINLINE void operator delete [] (void * p) //throw()
 {
 #if UMODEL
 	return appFree(p);

@@ -1,5 +1,5 @@
 // Simple UI library.
-// Copyright (C) 2019 Konstantin Nosov
+// Copyright (C) 2020 Konstantin Nosov
 // Licensed under the BSD license. See LICENSE.txt file in the project root for full license information.
 
 #ifndef __CORE_H__
@@ -13,10 +13,6 @@
 #include <stdarg.h>
 #include <string.h>
 
-
-#ifndef HAS_UI
-#define HAS_UI 1
-#endif
 
 #undef min
 #undef max

@@ -5,16 +5,19 @@
 #endif
 
 // Classes for registration
-#include "UnrealClasses.h"
+#include "UnCore.h"
+#include "UnObject.h"
 #include "UnPackage.h"
-#include "UnAnimNotify.h"
+#include "UnrealMesh/UnAnimNotify.h"
 
-#include "UnMaterial2.h"
-#include "UnMaterial3.h"
+#include "UnrealMaterial/UnMaterial.h"
+#include "UnrealMaterial/UnMaterial2.h"
+#include "UnrealMaterial/UnMaterial3.h"
+#include "UnrealMaterial/UnMaterialExpression.h"
 
-#include "UnMesh2.h"
-#include "UnMesh3.h"
-#include "UnMesh4.h"
+#include "UnrealMesh/UnMesh2.h"
+#include "UnrealMesh/UnMesh3.h"
+#include "UnrealMesh/UnMesh4.h"
 
 #include "UnSound.h"
 #include "UnThirdParty.h"
@@ -22,8 +25,8 @@
 #include "Exporters/Exporters.h"
 
 #if DECLARE_VIEWER_PROPS
-#include "SkeletalMesh.h"
-#include "StaticMesh.h"
+#include "Mesh/SkeletalMesh.h"
+#include "Mesh/StaticMesh.h"
 #endif
 
 #include "GameDatabase.h"
@@ -44,6 +47,9 @@
 // GSettings.Reset() will be called before main() executed.
 CUmodelSettings GSettings;
 
+#if THREADING
+extern bool GEnableThreads;
+#endif
 
 /*-----------------------------------------------------------------------------
 	Table of known Unreal classes
@@ -71,6 +77,7 @@ BEGIN_CLASS_TABLE
 #if DECLARE_VIEWER_PROPS
 	REGISTER_SKELMESH_VCLASSES
 	REGISTER_STATICMESH_VCLASSES
+	REGISTER_MATERIAL_VCLASSES
 #endif // DECLARE_VIEWER_PROPS
 
 END_CLASS_TABLE
@@ -103,6 +110,7 @@ static void RegisterUnrealClasses3()
 BEGIN_CLASS_TABLE
 //	REGISTER_MATERIAL_CLASSES_U3 -- registered for Bioshock in RegisterCommonUnrealClasses()
 	REGISTER_MESH_CLASSES_U3
+	REGISTER_EXPRESSION_CLASSES
 #if TUROK
 	REGISTER_MESH_CLASSES_TUROK
 #endif
@@ -120,6 +128,7 @@ BEGIN_CLASS_TABLE
 #endif
 END_CLASS_TABLE
 #endif // UNREAL3
+	SuppressUnknownClass("UBodySetup");
 }
 
 
@@ -129,10 +138,16 @@ static void RegisterUnrealClasses4()
 BEGIN_CLASS_TABLE
 	REGISTER_MESH_CLASSES_U4
 	REGISTER_MATERIAL_CLASSES_U4
+	REGISTER_EXPRESSION_CLASSES
 END_CLASS_TABLE
 	REGISTER_MATERIAL_ENUMS_U4
 	REGISTER_MESH_ENUMS_U4
 #endif // UNREAL4
+	SuppressUnknownClass("UMaterialExpression*"); // wildcard
+	SuppressUnknownClass("UMaterialFunction");
+	SuppressUnknownClass("UPhysicalMaterial");
+	SuppressUnknownClass("UBodySetup");
+	SuppressUnknownClass("UNavCollision");
 }
 
 
@@ -183,21 +198,29 @@ static void RegisterClasses(int game)
 	}
 	if (GSettings.Startup.UseSound) RegisterUnrealSoundClasses();
 
-	// remove some class loaders when requisted by command line
+	// remove some class loaders when requested by command line
 	if (!GSettings.Startup.UseAnimation)
 	{
 		UnregisterClass("MeshAnimation", true);
-		UnregisterClass("AnimSet",       true);
-		UnregisterClass("AnimSequence",  true);
-		UnregisterClass("AnimNotify",    true);
+		UnregisterClass("AnimSet", true);
+		UnregisterClass("AnimSequence", true);
+		UnregisterClass("AnimNotify", true);
 	}
 	if (!GSettings.Startup.UseSkeletalMesh)
 	{
-		UnregisterClass("SkeletalMesh",       true);
+		UnregisterClass("SkeletalMesh", true);
 		UnregisterClass("SkeletalMeshSocket", true);
+		UnregisterClass("MorphTarget", false);
+		if (!GSettings.Startup.UseAnimation)
+			UnregisterClass("Skeleton", false);
 	}
 	if (!GSettings.Startup.UseStaticMesh) UnregisterClass("StaticMesh", true);
-	if (!GSettings.Startup.UseTexture) UnregisterClass("UnrealMaterial", true);
+	if (!GSettings.Startup.UseTexture)
+	{
+		UnregisterClass("UnrealMaterial", true);
+		UnregisterClass("MaterialExpression", true);
+	}
+	if (!GSettings.Startup.UseMorphTarget) UnregisterClass("MorphTarget", false);
 	if (!GSettings.Startup.UseLightmapTexture) UnregisterClass("LightMapTexture2D", true);
 	if (!GSettings.Startup.UseScaleForm) UnregisterClass("SwfMovie", true);
 	if (!GSettings.Startup.UseFaceFx)
@@ -270,13 +293,11 @@ static void RegisterExporters()
 	RegisterExporter<UMeshAnimation>([](const UMeshAnimation* Anim) { CallExportAnimation(Anim->ConvertedAnim); });
 	RegisterExporter<UVertMesh>(Export3D);
 	RegisterExporter<UStaticMesh>([](const UStaticMesh* Mesh) { CallExportStaticMesh(Mesh->ConvertedMesh); });
-	RegisterExporter<UTexture>([](const UTexture* Tex) { ExportTexture(Tex); });
 	RegisterExporter<USound>(ExportSound);
 #if UNREAL3
 	RegisterExporter<USkeletalMesh3>([](const USkeletalMesh3* Mesh) { CallExportSkeletalMesh(Mesh->ConvertedMesh); });
 	RegisterExporter<UAnimSet>([](const UAnimSet* Anim) { CallExportAnimation(Anim->ConvertedAnim); });
 	RegisterExporter<UStaticMesh3>([](const UStaticMesh3* Mesh) { CallExportStaticMesh(Mesh->ConvertedMesh); });
-	RegisterExporter<UTexture2D>([](const UTexture2D* Tex) { ExportTexture(Tex); });
 	RegisterExporter<USoundNodeWave>(ExportSoundNodeWave);
 	RegisterExporter<USwfMovie>(ExportGfx);
 	RegisterExporter<UFaceFXAnimSet>(ExportFaceFXAnimSet);
@@ -353,10 +374,14 @@ static void PrintUsage()
 			"    -log=file       write log to the specified file\n"
 			"    -dump           dump object information to console\n"
 			"    -pkginfo        load package and display its information\n"
+			"    -testexport     perform fake export\n"
 #if SHOW_HIDDEN_SWITCHES
 			"    -check          check some assumptions, no other actions performed\n"
 #	if VSTUDIO_INTEGRATION
 			"    -debug          invoke system crash handler on errors\n"
+#	endif
+#	if THREADING
+			"    -nomt           disable multithreading optimizations\n"
 #	endif
 #endif // SHOW_HIDDEN_SWITCHES
 			"\n"
@@ -379,10 +404,11 @@ static void PrintUsage()
 			"    -noanim         disable loading of MeshAnimation classes\n"
 			"    -nostat         disable loading of StaticMesh class\n"
 			"    -notex          disable loading of Material classes\n"
+			"    -nomorph        disable loading of MorphTarget class\n"
 			"    -nolightmap     disable loading of Lightmap textures\n"
 			"    -sounds         allow export of sounds\n"
 			"    -3rdparty       allow 3rd party asset export (ScaleForm, FaceFX)\n"
-			"    -lzo|lzx|zlib   force compression method for fully-compressed packages\n"
+			"    -lzo|lzx|zlib   force compression method for UE3 fully-compressed packages\n"
 			"\n"
 			"Platform selection:\n"
 			"    -ps3            Playstation 3\n"
@@ -488,21 +514,12 @@ static void ExceptionHandler()
 {
 	FFileWriter::CleanupOnError();
 #if DO_GUARD
-	if (GErrorHistory[0])
-	{
-//		appPrintf("ERROR: %s\n", GErrorHistory);
-		appNotify("ERROR: %s\n", GErrorHistory);
-	}
-	else
-	{
-//		appPrintf("Unknown error\n");
-		appNotify("Unknown error\n");
-	}
+	GError.StandardHandler();
 #endif // DO_GUARD
-	#if HAS_UI
+#if HAS_UI
 	if (GApplication.GuiShown)
 		GApplication.ShowErrorDialog();
-	#endif // HAS_UI
+#endif // HAS_UI
 	exit(1);
 }
 
@@ -510,7 +527,7 @@ static void ExceptionHandler()
 // AbortHandler on linux will cause infinite recurse, but works well on Windows
 static void AbortHandler(int signal)
 {
-	if (GErrorHistory[0])
+	if (GError.History[0])
 	{
 		appPrintf("abort called during error handling\n", signal);
 #if VSTUDIO_INTEGRATION
@@ -530,7 +547,7 @@ int UE4UnversionedPackage(int verMin, int verMax)
 	int version = GApplication.ShowUE4UnversionedPackageDialog(verMin, verMax);
 	if (version >= 0) return version;
 #endif
-	appError("Unversioned UE4 packages are not supported. Please restart UModel and select UE4 version in range %d-%d using UI or command line.", verMin, verMax);
+	appErrorNoLog("Unversioned UE4 packages are not supported. Please restart UModel and select UE4 version in range %d-%d using UI or command line.", verMin, verMax);
 	return -1;
 }
 
@@ -552,7 +569,7 @@ static void CheckHexAesKey()
 	int remains = GAesKey.Len() - 2;
 	if (remains & 1)
 	{
-		appError("Hexadecimal AES key contains odd number of characters");
+		appErrorNoLog("Hexadecimal AES key contains odd number of characters");
 	}
 	while (remains > 0)
 	{
@@ -563,7 +580,7 @@ static void CheckHexAesKey()
 			char c = tolower(*s++);
 			if (!ishex(c))
 			{
-				appError("Illegal character in hexadecimal AES key");
+				appErrorNoLog("Illegal character in hexadecimal AES key");
 			}
 			b = hextodigit(c) << 4;
 			remains--;
@@ -571,7 +588,7 @@ static void CheckHexAesKey()
 		char c = tolower(*s++);
 		if (!ishex(c))
 		{
-			appError("Illegal character in hexadecimal AES key");
+			appErrorNoLog("Illegal character in hexadecimal AES key");
 		}
 		b |= hextodigit(c);
 		remains--;
@@ -683,6 +700,7 @@ int main(int argc, const char **argv)
 	signal(SIGABRT, AbortHandler);
 #endif
 
+	PROFILE_IF(false);
 	guard(Main);
 
 	if (argc == 2 && argv[1][0] == '@')
@@ -757,6 +775,7 @@ int main(int argc, const char **argv)
 			OPT_NBOOL("nostat",  GSettings.Startup.UseStaticMesh)
 			OPT_NBOOL("noanim",  GSettings.Startup.UseAnimation)
 			OPT_NBOOL("notex",   GSettings.Startup.UseTexture)
+			OPT_NBOOL("nomorph", GSettings.Startup.UseMorphTarget)
 			OPT_NBOOL("nolightmap", GSettings.Startup.UseLightmapTexture)
 			OPT_BOOL ("sounds",  GSettings.Startup.UseSound)
 			OPT_BOOL ("dds",     GSettings.Export.ExportDdsTexture)
@@ -771,7 +790,7 @@ int main(int argc, const char **argv)
 			OPT_VALUE("nsw",     GSettings.Startup.Platform, PLATFORM_SWITCH)
 			OPT_VALUE("ios",     GSettings.Startup.Platform, PLATFORM_IOS)
 			OPT_VALUE("android", GSettings.Startup.Platform, PLATFORM_ANDROID)
-			// compression
+			// UE3 compression method
 			OPT_VALUE("lzo",     GSettings.Startup.PackageCompression, COMPRESS_LZO )
 			OPT_VALUE("zlib",    GSettings.Startup.PackageCompression, COMPRESS_ZLIB)
 			OPT_VALUE("lzx",     GSettings.Startup.PackageCompression, COMPRESS_LZX )
@@ -881,6 +900,17 @@ int main(int argc, const char **argv)
 		{
 			PrintVersionInfo();
 			return 0;
+		}
+#if THREADING
+		else if (!stricmp(opt, "nomt"))
+		{
+			GEnableThreads = false;
+		}
+#endif
+		else if (!stricmp(opt, "testexport"))
+		{
+			mainCmd = CMD_Export;
+			GDummyExport = true;
 		}
 		else if (!stricmp(opt, "debug"))
 		{
@@ -1000,7 +1030,7 @@ int main(int argc, const char **argv)
 				bool failed = false;
 				if (bShouldLoadPackages)
 				{
-					UnPackage* Package = UnPackage::LoadPackage(*Files[j]->GetRelativeName());
+					UnPackage* Package = UnPackage::LoadPackage(Files[j]);
 					if (Package)
 					{
 						Packages.Add(Package);
@@ -1048,7 +1078,7 @@ int main(int argc, const char **argv)
 			UnPackage* Package = Packages[packageIndex];
 			if (Packages.Num() > 1)
 			{
-				appPrintf("\n%s\n", Package->Filename);
+				appPrintf("\n%s\n", *Package->GetFilename());
 			}
 			// dump package exports table
 			for (int i = 0; i < Package->Summary.ExportCount; i++)
@@ -1101,15 +1131,17 @@ int main(int argc, const char **argv)
 
 					found++;
 					totalFound++;
-					appPrintf("Export \"%s\" was found in package \"%s\"\n", objName, Package2->Filename);
+					appPrintf("Export \"%s\" was found in package \"%s\"\n", objName, *Package2->GetFilename());
 
 					// create object from package
 					UObject *Obj = Package2->CreateExport(idx);
 					if (Obj)
 					{
 						Objects.Add(Obj);
+#if RENDERING
 						if (objName == attachAnimName && (Obj->IsA("MeshAnimation") || Obj->IsA("AnimSet")))
 							GForceAnimSet = Obj;
+#endif
 					}
 				}
 				if (found) break;
@@ -1130,13 +1162,18 @@ int main(int argc, const char **argv)
 	}
 	UObject::EndLoad();
 
-	if (!UObject::GObjObjects.Num() && !GApplication.GuiShown && bShouldLoadObjects)
+	bool bNoSupportedObjects = !UObject::GObjObjects.Num() && bShouldLoadObjects;
+#if HAS_UI
+	bNoSupportedObjects &= !GApplication.GuiShown;
+#endif
+
+	if (bNoSupportedObjects)
 	{
 		appPrintf("\nThe specified package(s) has no supported objects.\n\n");
 	no_objects:
 		appPrintf("Selected package(s):\n");
 		for (int i = 0; i < Packages.Num(); i++)
-			appPrintf("  %s\n", Packages[i]->Filename);
+			appPrintf("  %s\n", *Packages[i]->GetFilename());
 		appPrintf("\n");
 		// display list of classes
 		DisplayPackageStats(Packages);
@@ -1152,7 +1189,7 @@ int main(int argc, const char **argv)
 		// If we have list of objects, the process only those ones. Otherwise, process full packages.
 		if (Objects.Num())
 		{
-			BeginExport();
+			BeginExport(true);
 	        ExportObjects(&Objects); // will export everything if "Objects" array is empty, however we're calling ExportPackages() in this case
 			EndExport();
 		}
@@ -1160,10 +1197,14 @@ int main(int argc, const char **argv)
 		{
 			ExportPackages(Packages);
 		}
+#if HAS_UI || RENDERING
 		if (!GApplication.GuiShown)
 			return 0;
 		// switch to a viewer in GUI mode
 		mainCmd = CMD_View;
+#else
+		return 0;
+#endif
 	}
 
 #if RENDERING
@@ -1191,7 +1232,7 @@ int main(int argc, const char **argv)
 	// find any object to display
 	if (!GApplication.FindObjectAndCreateVisualizer(1, GApplication.GuiShown, true))	//!! don't need to pass GuiShown there
 	{
-		appPrintf("\nThe specified package(s) has no objects to diaplay.\n\n");
+		appPrintf("\nThe specified package(s) has no objects to display.\n\n");
 		goto no_objects;
 	}
 
@@ -1233,5 +1274,6 @@ int main(int argc, const char **argv)
 		ExceptionHandler();
 	}
 #endif
+
 	return 0;
 }

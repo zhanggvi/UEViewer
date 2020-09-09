@@ -33,7 +33,7 @@ bool ExportObjects(const TArray<UObject*> *Objects, IProgressCallback* progress)
 		if (notifyPackage != ExpObj->Package)
 		{
 			notifyPackage = ExpObj->Package;
-			appSetNotifyHeader(notifyPackage->Filename);
+			appSetNotifyHeader(*notifyPackage->GetFilename());
 		}
 
 		bool done = ExportObject(ExpObj);
@@ -59,9 +59,11 @@ bool ExportPackages(const TArray<UnPackage*>& Packages, IProgressCallback* Progr
 	// to detect an engine version
 	InitClassAndExportSystems(Packages[0]->Game);
 
+#if RENDERING
 	// We'll entirely unload all objects, so we should reset viewer. Note: CUmodelApp does this too,
 	// however we're calling ExportPackages() from different code places, so call it anyway.
 	GApplication.ReleaseViewerAndObjects();
+#endif
 
 	bool cancelled = false;
 
@@ -69,7 +71,7 @@ bool ExportPackages(const TArray<UnPackage*>& Packages, IProgressCallback* Progr
 //	appResetProfiler(); -- there's nested appResetProfiler/appPrintProfiler calls, which are not supported
 #endif
 
-	BeginExport();
+	BeginExport(true);
 
 	// For each package: load a package, export, then release
 	for (int i = 0; i < Packages.Num(); i++)
@@ -162,50 +164,16 @@ void SavePackages(const TArray<const CGameFileInfo*>& Packages, IProgressCallbac
 		assert(mainFile);
 		FStaticString<MAX_PACKAGE_PATH> RelativeName;
 		mainFile->GetRelativeName(RelativeName);
-		if (Progress && !Progress->Progress(*RelativeName, i, GNumPackageFiles))
+		if (Progress && !Progress->Progress(*RelativeName, i, Packages.Num()))
 			break;
 
-		// Reference in UE4 code: FNetworkPlatformFile::IsAdditionalCookedFileExtension()
-		//!! TODO: perhaps save ALL files with the same path and name but different extension
-		static const char* additionalExtensions[] =
+		// Find all files with the same name and different extension (e.g. ".uexp", ".ubulk")
+		TStaticArray<const CGameFileInfo*, 32> allFiles;
+		allFiles.Add(mainFile);
+		mainFile->FindOtherFiles(allFiles);
+
+		for (const CGameFileInfo* file : allFiles)
 		{
-			"",				// empty string for original extension
-#if UNREAL4
-			".ubulk",
-			".uexp",
-			".uptnl",
-#endif // UNREAL4
-		};
-
-		for (int ext = 0; ext < ARRAY_COUNT(additionalExtensions); ext++)
-		{
-			const CGameFileInfo* file = mainFile;
-
-#if UNREAL4
-			// Check for additional UE4 files
-			if (ext > 0)
-			{
-				const char* Ext = mainFile->GetExtension();
-				if (stricmp(Ext, "uasset") == 0 || stricmp(Ext, "umap") == 0)
-				{
-					mainFile->GetRelativeNameNoExt(RelativeName);
-					char* extPlace = &RelativeName[0] + RelativeName.Len();
-					// Find additional file by replacing .uasset extension
-					strcpy(extPlace, additionalExtensions[ext]);
-					file = appFindGameFile(*RelativeName);
-					if (!file)
-					{
-						continue;
-					}
-				}
-				else
-				{
-					// there's no needs to process this file anymore - main file was already exported, no other files will exist
-					break;
-				}
-			}
-#endif // UNREAL4
-
 			FArchive *Ar = file->CreateReader();
 			if (Ar)
 			{

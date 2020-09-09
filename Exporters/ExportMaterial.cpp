@@ -2,19 +2,34 @@
 #include "UnCore.h"
 
 #include "UnObject.h"
-#include "UnMaterial.h"
-#include "UnMaterial3.h"
+#include "UnrealMaterial/UnMaterial.h"
+#include "UnrealMaterial/UnMaterial3.h"
 
 #include "Exporters.h"
 
 
-void ExportMaterial(const UUnrealMaterial *Mat)
+void ExportMaterial(const UUnrealMaterial* Mat)
 {
 	guard(ExportMaterial);
 
 #if RENDERING				// requires UUnrealMaterial::GetParams()
 
 	if (!Mat) return;
+
+	if (Mat->IsTextureCube())
+	{
+		ExportCubemap(Mat);
+		return;
+	}
+
+	if (Mat->IsTexture())
+	{
+		ExportTexture(Mat);
+		return;
+	}
+
+	//todo: handle Mat->IsTexture(), Mat->IsTextureCube() to select exporter code
+	//todo: remove separate texture handling from Main.cpp exporter registraction
 
 	TArray<UUnrealMaterial*> AllTextures;
 	Mat->AppendReferencedTextures(AllTextures, false);
@@ -37,7 +52,7 @@ void ExportMaterial(const UUnrealMaterial *Mat)
 	if (Params.Arg) \
 	{				\
 		Ar->Printf(#Arg"=%s\n", Params.Arg->Name); \
-		ToExport.Add(Params.Arg); \
+		ToExport.AddUnique(Params.Arg); \
 	}
 
 	PROC(Diffuse);
@@ -57,24 +72,19 @@ void ExportMaterial(const UUnrealMaterial *Mat)
 		delete PropAr;
 	}
 
-#if 0
-	// collect all textures - already exported ones and everything else
-	TArray<UUnrealMaterial*> ExportedTextures;
-	Params.AppendAllTextures(ExportedTextures);
-	// now, export only those which weren't exported yet
+	// Export other textures
 	int numOtherTextures = 0;
 	for (int i = 0; i < AllTextures.Num(); i++)
 	{
 		UUnrealMaterial* Tex = AllTextures[i];
-		if (ExportedTextures.FindItem(Tex) < 0)
+		if (ToExport.FindItem(Tex) < 0)
 		{
 			Ar->Printf("Other[%d]=%s\n", numOtherTextures++, Tex->Name);
-			ExportObject(Tex);
+			ToExport.Add(Tex);
 		}
 	}
-#endif
 
-	delete Ar;
+	delete Ar; // close .mat file
 
 	// We have done with current object, now let's export referenced objects.
 
@@ -84,6 +94,7 @@ void ExportMaterial(const UUnrealMaterial *Mat)
 			ExportObject(Obj);
 	}
 
+	// For MaterialInstanceConstant, export its parent too
 	if (Mat->IsA("MaterialInstanceConstant"))
 	{
 		const UMaterialInstanceConstant* Inst = static_cast<const UMaterialInstanceConstant*>(Mat);
@@ -91,16 +102,6 @@ void ExportMaterial(const UUnrealMaterial *Mat)
 		{
 			ExportMaterial(Inst->Parent);
 		}
-	}
-	else if (Mat->IsA("TextureCube3"))
-	{
-		const UTextureCube3* TexCube = static_cast<const UTextureCube3*>(Mat);
-		ExportObject(TexCube->FacePosX);
-		ExportObject(TexCube->FaceNegX);
-		ExportObject(TexCube->FacePosY);
-		ExportObject(TexCube->FaceNegY);
-		ExportObject(TexCube->FacePosZ);
-		ExportObject(TexCube->FaceNegZ);
 	}
 
 #endif // RENDERING

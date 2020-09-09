@@ -15,7 +15,8 @@ Options:
     --nobuild               prevent from umodel rebuilding
     --exe=<executable>      do not build when overrided (useful for testing with older exe from svn)
     --<game>                choose predefined game path; <game> = ut2|ut3|gow2 etc
-    --debug                 start with -debug option
+    --debug                 build with -debug option
+    --profile               build with --profile option
     --help                  display this help message
     --path=<path>			use instead of -path=... when path has spaces
     -path=<path>            set game path; will disable default game substitution
@@ -27,16 +28,16 @@ EOF
 shopt -s extglob
 
 exe=umodel.exe
-c_drive=
+win_drive=
 if [ "$OSTYPE" == "linux-gnu" ] || [ "$OSTYPE" == "linux" ]; then
 	exe="umodel"
-	# VirtualBox default C: drive mapping
-	if [ -d "/media/sf_C_DRIVE" ]; then
-		c_drive="/media/sf_C_DRIVE"			# VirtualBox
-	elif [ -d "/mnt/hgfs/C" ]; then
-		c_drive="/mnt/hgfs/C"				# VMware
+	# Windows to VM or Linux path conversion
+#	if [ -d "/media/sf_C_DRIVE" ]; then
+#		c_drive="/media/sf_C_DRIVE"			# VirtualBox - not supported now because it has drive letter in the middle
+	if [ -d "/mnt/hgfs/C" ]; then
+		win_drive="/mnt/hgfs/"				# VMware
 	elif [ -d "/media/c" ]; then
-		c_drive="/media/c"
+		win_drive="/media/"					# linux
 	fi
 fi
 
@@ -66,8 +67,8 @@ function CheckDir()
 		dir=$1
 		DBG "... check $dir"
 		# support Windows paths on Linux
-		if [ "$c_drive" ] && [ "${dir:1:1}" == ":" ]; then
-			dir="${c_drive}${dir:2}"
+		if [ "$win_drive" ] && [ "${dir:1:1}" == ":" ]; then
+			dir="${win_drive}${dir:0:1}/${dir:2}"
 		fi
 		if [ -z "$checkedDirs" ]; then
 			checkedDirs=$dir
@@ -136,6 +137,7 @@ function run1()
 
 function cmdline()
 {
+	debugOpt=""					# doesn't work when @cmdline is used
 	run @Docs/cmdline.cfg
 }
 
@@ -179,7 +181,7 @@ function fortnite()
 {
 	read aes < "Docs/fortnite.txt"
 	CheckDir "${launcher[@]/%/Fortnite/FortniteGame/Content/Paks}"
-	run -game=ue4.23 -aes=$aes $*
+	run -game=ue4.26 -aes=$aes $*
 }
 function ue3()
 {
@@ -242,6 +244,11 @@ function tr4()    { run1 "data/3/Tribes4" $*;     }
 function thief()  { run1 "${steam[@]/%/Thief/ThiefGame/CookedPCNG}" $*; }
 function ark()    { run1 "${steam[@]/%/ARK/ShooterGame/Content}" -game=ark $*; }
 function lawbr()  { run1 "${steam[@]/%/LawBreakers/ShooterGame/Content/Paks}" -game=lawbr $*; }
+function jfo()
+{
+	CheckDir "${steam[@]/%/Jedi Fallen Order/SwGame/Content/Paks}"	# "run1" doesn't work with $steam having multiple paths
+	run -game=jedi $*
+}
 
 function rund()   {	run1 "data" $*; }
 
@@ -254,7 +261,7 @@ nobuild=
 path=0
 
 # parse our command line options
-for arg in "$@"; do		# using quoted $@ will allow to correctly separate arguments like [ --path="some string with spaces" -debug ]
+for arg in "$@"; do		# using quoted $@ will allow to correctly separate arguments like [ --path="some string with spaces" --debug ]
 #	echo "ARG=$arg"
 	case $arg in
 	--help)
@@ -271,8 +278,11 @@ for arg in "$@"; do		# using quoted $@ will allow to correctly separate argument
 		nobuild=1
 		;;
 	--debug)
-		buildopt=--debug
+		buildopt="$buildopt --debug"
 		debugOpt=-debug
+		;;
+	--profile)
+		buildopt="$buildopt --profile"
 		;;
 	--path=*)
 		path=1

@@ -1,5 +1,6 @@
 #include "Core.h"
 #include "UnCore.h"
+#include "UE4Version.h"
 
 #if UNREAL4
 #include "UnObject.h"
@@ -12,6 +13,9 @@
 #include <io.h>					// for _filelengthi64
 #endif
 
+#if THREADING
+#include "Parallel.h"
+#endif
 
 #define FILE_BUFFER_SIZE		4096
 
@@ -23,16 +27,16 @@
 	FCompactIndex
 -----------------------------------------------------------------------------*/
 
-static bool GameUsesFCompactIndex(FArchive &Ar)
+FORCEINLINE bool GameUsesFCompactIndex(FArchive &Ar)
 {
+#if UNREAL3
+	if (Ar.Engine() >= GAME_UE3) return false;
+#endif
 #if UC2
 	if (Ar.Engine() == GAME_UE2X && Ar.ArVer >= 145) return false;
 #endif
 #if VANGUARD
 	if (Ar.Game == GAME_Vanguard && Ar.ArVer >= 128 && Ar.ArLicenseeVer >= 25) return false;
-#endif
-#if UNREAL3
-	if (Ar.Engine() >= GAME_UE3) return false;
 #endif
 	return true;
 }
@@ -133,7 +137,7 @@ FArchive& FArray::Serialize(FArchive &Ar, void (*Serializer)(FArchive&, void*), 
 }
 
 
-struct DummyItem	// non-srializeable
+struct DummyItem	// non-serializeable
 {
 	friend FArchive& operator<<(FArchive &Ar, DummyItem &Item)
 	{
@@ -365,7 +369,10 @@ FArchive& operator<<(FArchive &Ar, FString &S)
 	// loading
 
 	// serialize character count
-	int len;
+	int32 len;
+
+	if (Ar.Game >= GAME_UE3) goto ue3; // just a shortcut for UE3 and UE4
+
 #if BIOSHOCK
 	if (Ar.Game == GAME_Bioshock)
 	{
@@ -380,18 +387,22 @@ FArchive& operator<<(FArchive &Ar, FString &S)
 	else
 #endif
 	if (GameUsesFCompactIndex(Ar))
+	{
 		Ar << AR_INDEX(len);
+	}
 	else
+	{
+	ue3:
 		Ar << len;
+	}
 
-	S.Empty((len >= 0) ? len : -len);
-
-	// resialize the string
+	// serialize the string
 	if (!len)
 	{
 		// empty FString
 		// original UE has array count == 0 and special handling when converting FString
 		// to char*
+		S.Data.Empty(1);
 		S.Data.AddZeroed(1);
 		return Ar;
 	}
@@ -399,23 +410,27 @@ FArchive& operator<<(FArchive &Ar, FString &S)
 	if (len > 0)
 	{
 		// ANSI string
+		S.Data.Empty(len);
 		S.Data.AddUninitialized(len);
 		Ar.Serialize(S.Data.GetData(), len);
 	}
 	else
 	{
 		// UNICODE string
-		for (int i = 0; i < -len; i++)
+		len = -len;
+		S.Data.Empty(len);
+		for (int i = 0; i < len; i++)
 		{
 			uint16 c;
 			Ar << c;
-#if MASSEFF
-			if (Ar.Game == GAME_MassEffect3 && Ar.ReverseBytes)	// uses little-endian strings for XBox360
-				c = (c >> 8) | ((c & 0xFF) << 8);
-#endif
 			if (c & 0xFF00) c = '$';	//!! incorrect ...
 			S.Data.Add(c & 255);		//!! incorrect ...
 		}
+#if MASSEFF
+		// Xbox360 version of Mass Effect 3 is using little-endian strings
+		if (Ar.Game == GAME_MassEffect3 && Ar.ReverseBytes)
+			appReverseBytes(S.Data.GetData(), len, 2);
+#endif
 	}
 	if (S[abs(len)-1] != 0)
 		appError("Serialized FString is not null-terminated");
@@ -431,6 +446,7 @@ FArchive& operator<<(FArchive &Ar, FString &S)
 
 void FArchive::ByteOrderSerialize(void *data, int size)
 {
+	PROFILE_IF(size >= 1024);
 	guard(FArchive::ByteOrderSerialize);
 
 	Serialize(data, size);
@@ -490,16 +506,22 @@ void FArchive::Printf(const char *fmt, ...)
 
 	#endif
 
-#endif // _WIN32
+#elif __APPLE__
+
+	// On Darwin, all file APIs are 64-bit
+	#define fopen64			fopen
+	#define fseeko64		fseeko
+	#define ftello64		ftell
+
+#endif // _WIN32 / __APPLE__
 
 FFileArchive::FFileArchive(const char *Filename, unsigned InOptions)
 :	Options(InOptions)
 ,	f(NULL)
-,	FileSize(-1)
 ,	Buffer(NULL)
-,	BufferPos(0)
 ,	BufferSize(0)
-,	ArPos64(0)
+,	BufferPos(0)
+,	FilePos(0)
 {
 	// process the filename
 	FullName = appStrdup(Filename);
@@ -514,38 +536,11 @@ FFileArchive::~FFileArchive()
 	appFree(const_cast<char*>(FullName));
 }
 
-void FFileArchive::Seek(int Pos)
-{
-	ArPos64 = Pos;
-}
-
-void FFileArchive::Seek64(int64 Pos)
-{
-	ArPos64 = Pos;
-}
-
-int FFileArchive::Tell() const
-{
-	guard(FFileArchive::Tell());
-	return (int)ArPos64;
-	unguard;
-}
-
-int64 FFileArchive::Tell64() const
-{
-	return ArPos64;
-}
-
 int FFileArchive::GetFileSize() const
 {
 	int64 size = GetFileSize64();
-	if (size >= (1LL << 31)) appError("GetFileSize returns 0x%llX", size);
+	if (size >= (1LL << 31)) appError("GetFileSize returns 0x%llX", size); // 2Gb size restriction
 	return (int)size;
-}
-
-bool FFileArchive::IsEof() const
-{
-	return ArPos64 >= GetFileSize64();
 }
 
 // this function is useful only for FRO_NoOpenError mode
@@ -570,8 +565,8 @@ bool FFileArchive::OpenFile()
 	guard(FFileArchive::OpenFile);
 	assert(!IsOpen());
 
-	ArPos64 = FilePos = 0;
-	Buffer = (byte*)appMalloc(FILE_BUFFER_SIZE);
+	FilePos = 0;
+	Buffer = (byte*)appMallocNoInit(FILE_BUFFER_SIZE);
 	BufferPos = 0;
 	BufferSize = 0;
 
@@ -597,6 +592,10 @@ bool FFileArchive::OpenFile()
 
 FFileReader::FFileReader(const char *Filename, unsigned InOptions)
 :	FFileArchive(Filename, InOptions)
+,	SeekPos(-1)
+,	FileSize(-1)
+,	BufferBytesLeft(0)
+,	LocalReadPos(0)
 {
 	guard(FFileReader::FFileReader);
 	IsLoading = true;
@@ -611,44 +610,86 @@ FFileReader::~FFileReader()
 
 void FFileReader::Serialize(void *data, int size)
 {
+	PROFILE_IF(size >= 1024);
 	guard(FFileReader::Serialize);
 
 	assert(data);
 
-	if (ArStopper > 0 && ArPos64 + size > ArStopper)
-		appError("Serializing behind stopper (%llX+%X > %X)", ArPos64, size, ArStopper);
+	if (ArStopper > 0 && LocalReadPos + size > ArStopper - BufferPos)
+		appError("Serializing behind stopper (%llX+%X > %X)", BufferPos + LocalReadPos, size, ArStopper);
 
+	// The function is optimized for calling frequently with reading data from buffer
 	while (size > 0)
 	{
-		int64 LocalPos64 = ArPos64 - BufferPos;
-		if (LocalPos64 < 0 || LocalPos64 >= BufferSize)
+		if (BufferBytesLeft > 0)
 		{
-			// seek to desired position if needed
-			if (ArPos64 != FilePos)
+			// Use the buffer
+			byte* BufferPtr = Buffer + LocalReadPos;
+			int CanCopy = size > BufferBytesLeft ? BufferBytesLeft : size;
+			// Copy data. If we're copying 1-2-4 bytes, "special" code works faster than the case with memcpy.
+			switch (CanCopy)
 			{
-				if (fseeko64(f, ArPos64, SEEK_SET) != 0)
-					appError("Error seeking to position 0x%llX", ArPos64);
-				FilePos = ArPos64;
+			case 1:
+				*(byte*)data = *(BufferPtr);
+				break;
+			case 2:
+				*(uint16*)data = *(uint16*)BufferPtr;
+				break;
+			case 4:
+				*(uint32*)data = *(uint32*)BufferPtr;
+				break;
+			default:
+				memcpy(data, BufferPtr, CanCopy);
 			}
-			// the requested data is not in buffer
-			if (size >= FILE_BUFFER_SIZE)
+			// Advance pointers
+			BufferBytesLeft -= CanCopy;
+			data = OffsetPointer(data, CanCopy);
+			size -= CanCopy;
+			LocalReadPos += CanCopy;
+		}
+		else
+		{
+			// Buffer is empty
+			if (SeekPos >= 0)
 			{
-				// large block, read directly from file
+				// Seek to desired position
+				if (SeekPos != FilePos)
+				{
+					if (fseeko64(f, SeekPos, SEEK_SET) != 0)
+						appError("Error seeking to position 0x%llX", SeekPos);
+					FilePos = SeekPos;
+				}
+				SeekPos = -1;
+			}
+		#if MAX_DEBUG
+			int tell = ftell(f); // msvcrt.dll doesn't have ftelli64, ftell() returns -1 when position is larger than 4Gb
+			if (tell != -1 && tell != FilePos)
+				appError("Bad FilePos!");
+		#endif
+			if (size >= FILE_BUFFER_SIZE / 2)
+			{
+				// Large block, read directly to destination skipping buffer
+//				appPrintf("read2: %d+%d -> %d\n", (int)FilePos, size, (int)FilePos + size);
 				int res = fread(data, size, 1, f);
 				if (res != 1)
-					appError("Unable to read %d bytes at pos=0x%llX", size, ArPos64);
+					appError("Unable to read %d bytes at pos=0x%llX", size, FilePos);
 			#if PROFILE
 				GNumSerialize++;
 				GSerializeBytes += size;
 			#endif
-				ArPos64 += size;
 				FilePos += size;
+				BufferPos = FilePos;
+				// Invalidate buffer
+				BufferSize = 0;
+				BufferBytesLeft = 0;
+				LocalReadPos = 0;
 				return;
 			}
-			// fill buffer
+			// Fill buffer
 			int ReadBytes = fread(Buffer, 1, FILE_BUFFER_SIZE, f);
+//			appPrintf("read: %d+%d -> %d\n", (int)FilePos, ReadBytes, (int)FilePos + ReadBytes);
 			if (ReadBytes == 0)
-				appError("Unable to read %d bytes at pos=0x%llX", 1, ArPos64);
+				appError("Unable to read %d bytes at pos=0x%llX", 1, FilePos);
 		#if PROFILE
 			GNumSerialize++;
 			GSerializeBytes += ReadBytes;
@@ -656,21 +697,9 @@ void FFileReader::Serialize(void *data, int size)
 			BufferPos = FilePos;
 			BufferSize = ReadBytes;
 			FilePos += ReadBytes;
-			// update LocalPos
-			LocalPos64 = ArPos64 - BufferPos;
-			assert(LocalPos64 >= 0 && LocalPos64 < BufferSize);
+			BufferBytesLeft = ReadBytes;
+			LocalReadPos = 0;
 		}
-
-		// here we have 32-bit position in buffer
-		int LocalPos = (int)LocalPos64;
-
-		// have something in buffer
-		int CanCopy = BufferSize - LocalPos;
-		if (CanCopy > size) CanCopy = size;
-		memcpy(data, Buffer + LocalPos, CanCopy);
-		data = OffsetPointer(data, CanCopy);
-		size -= CanCopy;
-		ArPos64 += CanCopy;
 	}
 
 	unguardf("File=%s", ShortName);
@@ -681,45 +710,107 @@ bool FFileReader::Open()
 	return OpenFile();
 }
 
+void FFileReader::Seek(int Pos)
+{
+	Seek64(Pos);
+}
+
+void FFileReader::Seek64(int64 Pos)
+{
+//	appPrintf("seek: %d\n", (int)Pos);
+	// Check for buffer validity
+	int64 LocalPos64 = Pos - BufferPos;
+	if (LocalPos64 < 0 || LocalPos64 >= BufferSize)
+	{
+		// Outside of the current buffer, invalidate it
+		BufferSize = 0;
+		BufferBytesLeft = 0;
+		LocalReadPos = 0;
+		// SeekPos will be reset to -1 after actual seek
+		BufferPos = SeekPos = Pos;
+	}
+	else
+	{
+		// Inside of the buffer, recompute number of bytes to the end
+		LocalReadPos = (int)LocalPos64;
+		BufferBytesLeft = BufferSize - LocalReadPos;
+	}
+}
+
+int FFileReader::Tell() const
+{
+	assert((BufferPos >> 32) == 0);
+	return (int)BufferPos + LocalReadPos;
+}
+
+int64 FFileReader::Tell64() const
+{
+	return BufferPos + LocalReadPos;
+}
+
 int64 FFileReader::GetFileSize64() const
 {
 	// lazy file size computation
 	if (FileSize < 0)
 	{
-#if _WIN32
 		FFileReader* _this = const_cast<FFileReader*>(this);
-		// don't rewind file back
-		_this->FilePos = _this->FileSize = _filelengthi64(fileno(f));
+#if _WIN32
+		_this->FileSize = _filelengthi64(fileno(f));
 #else
 		fseeko64(f, 0, SEEK_END);
-		FFileReader* _this = const_cast<FFileReader*>(this);
-		// don't rewind file back
-		_this->FilePos = _this->FileSize = ftello64(f);
+		_this->FileSize = ftello64(f);
+		fseeko64(f, 0, FilePos);
 #endif // _WIN32
 	}
 	return FileSize;
 }
 
+bool FFileReader::IsEof() const
+{
+	if (Options & FAO_TextFile)
+	{
+		// We're tracking file position as it returned by our read operations, however "text file" means
+		// skipping "\r" characters, so position may not match.
+		appError("FFileReader::IsEof is not suitable for text files (%s)", FullName);
+	}
+	return (BufferBytesLeft == 0) && (FilePos == GetFileSize64());
+}
+
 static TArray<FFileWriter*> GFileWriters;
+
+#if THREADING
+static CMutex GFileWritersMutex;
+#endif
 
 FFileWriter::FFileWriter(const char *Filename, unsigned InOptions)
 :	FFileArchive(Filename, InOptions)
+,	FileSize(0)
+,	ArPos64(0)
 {
 	guard(FFileWriter::FFileWriter);
 	IsLoading = false;
 	Open();
+#if THREADING
+	CMutex::ScopedLock Lock(GFileWritersMutex);
+#endif
 	GFileWriters.Add(this);
 	unguardf("%s", Filename);
 }
 
 FFileWriter::~FFileWriter()
 {
+#if THREADING
+	CMutex::ScopedLock Lock(GFileWritersMutex);
+#endif
 	GFileWriters.RemoveSingle(this);
 	Close();
 }
 
 void FFileWriter::CleanupOnError()
 {
+#if THREADING
+	CMutex::ScopedLock Lock(GFileWritersMutex);
+#endif
 	for (int i = GFileWriters.Num() - 1; i >= 0; i--)
 	{
 		FFileWriter* Writer = GFileWriters[i];
@@ -795,9 +886,10 @@ void FFileWriter::Serialize(void *data, int size)
 bool FFileWriter::Open()
 {
 	assert(!IsOpen());
-	Buffer = (byte*)appMalloc(FILE_BUFFER_SIZE);
+	Buffer = (byte*)appMallocNoInit(FILE_BUFFER_SIZE);
 	BufferPos = 0;
 	BufferSize = 0;
+	ArPos64 = 0;
 	return OpenFile();
 }
 
@@ -830,28 +922,97 @@ void FFileWriter::FlushBuffer()
 	}
 }
 
+void FFileWriter::Seek(int Pos)
+{
+	ArPos64 = Pos;
+}
+
+void FFileWriter::Seek64(int64 Pos)
+{
+	ArPos64 = Pos;
+}
+
+int FFileWriter::Tell() const
+{
+	return (int)ArPos64;
+}
+
+int64 FFileWriter::Tell64() const
+{
+	return ArPos64;
+}
+
 int64 FFileWriter::GetFileSize64() const
 {
 	return max(FileSize, FilePos + BufferSize);
 }
 
+bool FFileWriter::IsEof() const
+{
+	return ArPos64 >= GetFileSize64();
+}
+
+#undef ArPos
+
 
 /*-----------------------------------------------------------------------------
-	Dummy archive class
+	FMemReader
 -----------------------------------------------------------------------------*/
 
-class CDummyArchive : public FArchive
+FArchive& FMemReader::operator<<(FName& N)
 {
-public:
-	virtual void Seek(int Pos)
-	{}
-	virtual void Serialize(void *data, int size)
-	{}
-};
+	FStaticString<256> NameString;
+	*this << NameString;
+	N.Str = appStrdupPool(*NameString);
+	return *this;
+}
 
 
-static CDummyArchive DummyArchive;
-FArchive *GDummySave = &DummyArchive;
+/*-----------------------------------------------------------------------------
+	FMemWriter
+-----------------------------------------------------------------------------*/
+
+FMemWriter::FMemWriter()
+{
+	IsLoading = false;
+	Data = new TArray<byte>();
+	Data->Empty(FILE_BUFFER_SIZE);
+}
+
+FMemWriter::~FMemWriter()
+{
+	delete Data;
+}
+
+void FMemWriter::Seek(int Pos)
+{
+	guard(FMemWriter::Seek);
+	assert(Pos >= 0 && Pos <= Data->Num());
+	ArPos = Pos;
+	unguard;
+}
+
+bool FMemWriter::IsEof() const
+{
+	return ArPos >= Data->Num();
+}
+
+void FMemWriter::Serialize(void *data, int size)
+{
+	PROFILE_IF(size >= 1024);
+	guard(FMemWriter::Serialize);
+	if (ArPos + size > Data->Num())
+	{
+		Data->AddUninitialized(ArPos + size - Data->Num());
+	}
+	memcpy(Data->GetData() + ArPos, data, size);
+	ArPos += size;
+	unguard;
+}
+int FMemWriter::GetFileSize() const
+{
+	return Data->Num();
+}
 
 
 /*-----------------------------------------------------------------------------
@@ -968,7 +1129,7 @@ void appReadCompressedChunk(FArchive &Ar, byte *Buffer, int Size, int Compressio
 	Ar << ChunkHeader;
 	// prepare buffer for reading compressed data
 	int BufferSize = ChunkHeader.BlockSize * 16;
-	byte *ReadBuffer = (byte*)appMalloc(BufferSize);	// BlockSize is size of uncompressed data
+	byte *ReadBuffer = (byte*)appMallocNoInit(BufferSize);	// BlockSize is size of uncompressed data
 	// read and decompress data
 	for (int BlockIndex = 0; BlockIndex < ChunkHeader.Blocks.Num(); BlockIndex++)
 	{
@@ -982,7 +1143,8 @@ void appReadCompressedChunk(FArchive &Ar, byte *Buffer, int Size, int Compressio
 	}
 	// finalize
 	assert(Size == 0);			// should be comletely read
-	delete ReadBuffer;
+	appFree(ReadBuffer);
+
 	unguard;
 }
 
@@ -998,7 +1160,9 @@ void FByteBulkData::SerializeHeader(FArchive &Ar)
 
 		bIsUE4Data = true;
 
-		Ar << BulkDataFlags << ElementCount;
+		Ar << BulkDataFlags;
+		assert(!(BulkDataFlags & BULKDATA_Size64Bit));
+		Ar << ElementCount;
 		Ar << BulkDataSizeOnDisk;
 		if (Ar.ArVer < VER_UE4_BULKDATA_AT_LARGE_OFFSETS)
 		{
@@ -1152,7 +1316,7 @@ void FByteBulkData::Serialize(FArchive &Ar)
 
 	SerializeHeader(Ar);
 
-	if (BulkDataFlags & BULKDATA_Unused)	// skip serializing
+	if (BulkDataFlags & BULKDATA_Unused || ElementCount == 0)	// skip serializing
 	{
 #if DEBUG_BULK
 		appPrintf("bulk with no data\n");
@@ -1176,6 +1340,13 @@ void FByteBulkData::Serialize(FArchive &Ar)
 		}
 		if (BulkDataFlags & BULKDATA_PayloadAtEndOfFile)
 		{
+			if (BulkDataOffsetInFile + 16 >= Ar.GetFileSize64())
+			{
+				appPrintf("FByteBulkData::Serialize: position is outside of the file (%d bytes)\n", BulkDataSizeOnDisk);
+				// Prevent any possible use of this bulk
+				BulkDataFlags |= BULKDATA_Unused;
+				return;
+			}
 			// stored in the same file, but at different position
 			// save archive position
 			int savePos, saveStopper;
@@ -1296,7 +1467,7 @@ void FByteBulkData::SerializeData(FArchive &Ar)
 		UnPackage* Package = Ar.CastTo<UnPackage>();
 		assert(Package);
 		//!! should make the following code as separate function
-		const CGameFileInfo* info = appFindGameFile(Package->Filename);
+		const CGameFileInfo* info = Package->FileInfo;
 		FArchive* loader = NULL;
 		if (info)
 		{
@@ -1305,7 +1476,7 @@ void FByteBulkData::SerializeData(FArchive &Ar)
 		}
 		else
 		{
-			loader = new FFileReader(Package->Filename);
+			loader = new FFileReader(*Package->GetFilename());
 		}
 		loader->Game = Ar.Game;
 
@@ -1347,7 +1518,7 @@ void FByteBulkData::SerializeDataChunk(FArchive &Ar)
 	BulkData = NULL;
 	int DataSize = ElementCount * GetElementSize();
 	if (!DataSize) return;		// nothing to serialize
-	BulkData = (byte*)appMalloc(DataSize);
+	BulkData = (byte*)appMallocNoInit(DataSize);
 
 	if (BulkDataFlags & (BULKDATA_CompressedLzo | BULKDATA_CompressedZlib | BULKDATA_CompressedLzx))
 	{
@@ -1394,7 +1565,7 @@ bool FByteBulkData::SerializeData(const UObject* MainObj) const
 
 	const UnPackage* Package = MainObj->Package;
 
-	strcpy(bulkFileName, Package->Filename);
+	strcpy(bulkFileName, *Package->GetFilename());
 	//!! check for presence of BULKDATA_PayloadAtEndOfFile flag
 	if (BulkDataFlags & (BULKDATA_OptionalPayload|BULKDATA_PayloadInSeperateFile))
 	{
@@ -1406,7 +1577,7 @@ bool FByteBulkData::SerializeData(const UObject* MainObj) const
 		strcpy(s, (BulkDataFlags & BULKDATA_OptionalPayload) ? ".uptnl" : ".ubulk");
 	}
 
-	const CGameFileInfo* bulkFile = appFindGameFile(bulkFileName);
+	const CGameFileInfo* bulkFile = CGameFileInfo::Find(bulkFileName);
 	if (!bulkFile)
 	{
 		appPrintf("FByteBulkData %s: file %s is missing\n", MainObj->Name, bulkFileName);

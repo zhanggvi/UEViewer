@@ -1,5 +1,5 @@
 // Simple UI library.
-// Copyright (C) 2019 Konstantin Nosov
+// Copyright (C) 2020 Konstantin Nosov
 // Licensed under the BSD license. See LICENSE.txt file in the project root for full license information.
 
 #if _WIN32
@@ -14,9 +14,6 @@
 #endif // _WIN32
 
 #include "BaseDialog.h"
-
-#if HAS_UI
-
 #include "UIPrivate.h"
 
 /*-----------------------------------------------------------------------------
@@ -636,5 +633,3 @@ void UIMenu::Popup(UIElement* Owner, int x, int y)
 
 	unguard;
 }
-
-#endif // HAS_UI

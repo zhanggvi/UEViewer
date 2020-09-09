@@ -1,7 +1,6 @@
-#include "BaseDialog.h"
-
 #if HAS_UI
 
+#include "BaseDialog.h"
 #include "PackageDialog.h"
 #include "PackageScanDialog.h"
 #include "ProgressDialog.h"
@@ -10,6 +9,8 @@
 
 #include "UnPackage.h"
 #include "UmodelCommands.h"
+
+#include "Parallel.h"
 
 #define USE_FULLY_VIRTUAL_LIST		1		// disable only for testing, to compare UIMulticolumnListbox behavior in virtual modes
 
@@ -44,6 +45,10 @@ public:
 				start = end + 1;
 			}
 		}
+	}
+	inline bool IsEmpty() const
+	{
+		return Values.Num() == 0;
 	}
 	bool Filter(const char* str) const
 	{
@@ -98,38 +103,55 @@ public:
 	#endif
 	}
 
+	// Fill package list for selected folder
 	void FillPackageList(UIPackageDialog::PackageList& InPackages, const char* directory, const char* packageFilter)
 	{
+		guard(FillPackageList);
+
 		LockUpdate();
 
 		RemoveAllItems();
-		Packages.Empty();
+		Packages.Empty(256);
+
+		int folderIndex = appGetGameFolderIndex(directory);
+		if (folderIndex <= 0)
+		{
+			UnlockUpdate();
+			return;		// there's no files in this folder
+		}
 
 		CFilter filter(packageFilter);
-
 		for (const CGameFileInfo* package : InPackages)
 		{
-			FStaticString<MAX_PACKAGE_PATH> RelativeName;
-			package->GetRelativeName(RelativeName);
-			char* s = strrchr(&RelativeName[0], '/');
-			if (s) *s++ = 0;
-			if ((!s && !directory[0]) ||					// root directory
-				(s && !strcmp(*RelativeName, directory)))	// another directory
+			if (package->FolderIndex == folderIndex)
 			{
-				const char* packageName = s ? s : *RelativeName;
-				if (filter.Filter(packageName))
+				// This package is in selected directory
+				if (filter.IsEmpty())
 				{
-					// this package is in selected directory
 					AddPackage(package);
+				}
+				else
+				{
+					FStaticString<MAX_PACKAGE_PATH> PackageName;
+					package->GetCleanName(PackageName);
+					if (filter.Filter(*PackageName))
+					{
+						AddPackage(package);
+					}
 				}
 			}
 		}
 
 		UnlockUpdate(); // this will call Repaint()
+
+		unguard;
 	}
 
+	// Fill package list for all folders ("flat" mode)
 	void FillFlatPackageList(UIPackageDialog::PackageList& InPackages, const char* packageFilter)
 	{
+		guard(FillFlatPackageList);
+
 		LockUpdate(); // HUGE performance gain. Warning: don't use "return" here without UnlockUpdate()!
 
 		RemoveAllItems();
@@ -142,13 +164,22 @@ public:
 #endif
 		for (const CGameFileInfo* package : InPackages)
 		{
-			FStaticString<MAX_PACKAGE_PATH> RelativeName;
-			package->GetRelativeName(RelativeName);
-			if (filter.Filter(*RelativeName))
+			if (filter.IsEmpty())
+			{
 				AddPackage(package);
+			}
+			else
+			{
+				FStaticString<MAX_PACKAGE_PATH> RelativeName;
+				package->GetRelativeName(RelativeName);
+				if (filter.Filter(*RelativeName))
+					AddPackage(package);
+			}
 		}
 
 		UnlockUpdate();
+
+		unguard;
 	}
 
 	void AddPackage(const CGameFileInfo* package)
@@ -164,7 +195,7 @@ public:
 		int index = AddItem(*Buffer);
 		char buf[32];
 		// put object count information as subitems
-		if (package->PackageScanned)
+		if (package->IsPackageScanned)
 		{
 #define ADD_COLUMN(ColumnEnum, Value)		\
 			if (Value)						\
@@ -233,7 +264,7 @@ private:
 			appSprintf(&Buffer[0], 63, "%d", file->SizeInKb + file->ExtraSizeInKb);
 			OutText = *Buffer;
 		}
-		else if (file->PackageScanned)
+		else if (file->IsPackageScanned)
 		{
 			int value = 0;
 			switch (SubItemIndex)
@@ -295,11 +326,11 @@ UIPackageDialog::EResult UIPackageDialog::Show()
 void UIPackageDialog::SelectPackage(UnPackage* package)
 {
 	SelectedPackages.Empty();
-	const CGameFileInfo* info = appFindGameFile(package->Filename);
+	const CGameFileInfo* info = package->FileInfo;
 	if (info)
 	{
 		SelectedPackages.Add(info);
-		SelectDirFromFilename(package->Filename);
+		SelectedDir = info->GetPath();
 	}
 }
 
@@ -385,65 +416,91 @@ void UIPackageDialog::InitUI()
 		]
 	];
 
+	CSemaphore packageSortComplete;
 	if (!Packages.Num())
 	{
-		// package list was not filled yet
-		appEnumGameFiles<TArray<const CGameFileInfo*> >( // won't compile with lambda without explicitly providing template argument
+		guard(FetchPackageList);
+
+		// Package list was not filled yet
+		// Count packages first for more efficient Packages.Add() when number of packages is very large
+		int NumPackages = 0;
+		appEnumGameFiles<int&>(
+			[](const CGameFileInfo* file, int& param) -> bool
+			{
+				param++;
+				return true;
+			}, NumPackages);
+		Packages.Empty(NumPackages);
+		// Fill Packages list
+		appEnumGameFiles<TArray<const CGameFileInfo*> >(
 			[](const CGameFileInfo* file, TArray<const CGameFileInfo*>& param) -> bool
 			{
 				param.Add(file);
 				return true;
 			}, Packages);
+
+		ThreadPool::TryExecuteInThread([this]()
+			{
+				// Perform sort - 1st part of UIPackageDialog::SortPackages()
+				SortPackages(Packages, SortedColumn, ReverseSort);
+			}, &packageSortComplete);
+
+		unguard;
 	}
 
-	// add paths of all found packages to the directory tree
+	// Add paths of all found packages to the directory tree
+
 	if (SelectedPackages.Num()) DirectorySelected = true;
-	char prevPath[MAX_PACKAGE_PATH];
-	prevPath[0] = 0;
-	// Make a copy of package list sorted by name, to ensure directory tree is always sorted.
-	// Using a copy to not affect package sorting used before.
-	PackageList SortedPackages;
-	CopyArray(SortedPackages, Packages);
-	SortPackages(SortedPackages, UIPackageList::COLUMN_Name, false);
-	bool isUE4 = false;
-	for (int i = 0; i < Packages.Num(); i++)
-	{
-		FStaticString<MAX_PACKAGE_PATH> RelativeName;
-		SortedPackages[i]->GetRelativeName(RelativeName);
-		char* s = strrchr(&RelativeName[0], '/');
-		if (s)
+
+	guard(FillFolderTree);
+
+	TArray<const FString*> Folders;
+	Folders.Empty(4096); //todo
+	appEnumGameFolders<TArray<const FString*> >(
+		[](const FString& Folder, int NumFiles, TArray<const FString*>& Folders) -> bool
 		{
-			*s = 0;
-			// simple optimization - avoid calling PackageTree->AddItem() too frequently (assume package list is sorted)
-			if (!strcmp(prevPath, *RelativeName)) continue;
-			strcpy(prevPath, *RelativeName);
-			// add a directory to TreeView
-			PackageTree->AddItem(*RelativeName);
-		}
+			Folders.Add(&Folder);
+			return true;
+		}, Folders);
+	Folders.Sort([](const FString* const& A, const FString* const& B) -> int
+		{
+			return stricmp(**A, **B);
+		});
+
+	// bool isUE4 = false; //todo: not really used
+	for (const FString* Folder : Folders)
+	{
+		// Add a directory to TreeView
+		const FString& Path = *Folder;
+		PackageTree->AddItem(*Path);
+
 		if (!DirectorySelected)
 		{
 			// find the first directory with packages, but don't select /Engine subdirectories by default
-			bool isUE4EnginePath = (strnicmp(*RelativeName, "Engine/", 7) == 0) || (strnicmp(*RelativeName, "/Engine/", 8) == 0) || strstr(*RelativeName, "/Plugins/") != NULL;
-			if (!isUE4EnginePath && (stricmp(*RelativeName, *SelectedDir) < 0 || SelectedDir.IsEmpty()))
+			bool isUE4EnginePath = (strnicmp(*Path, "Engine", 6) == 0) || (strnicmp(*Path, "/Engine", 7) == 0) || strstr(*Path, "/Plugins") != NULL;
+			if (!isUE4EnginePath && (stricmp(*Path, *SelectedDir) < 0 || SelectedDir.IsEmpty()))
 			{
 				// set selection to the first directory
-				SelectedDir = s ? RelativeName : "";
+				SelectedDir = Path;
 			}
 		}
-		if (RelativeName[0] == '/' && !strncmp(*RelativeName, "/Game/", 6))
-			isUE4 = true;
+		// if (!isUE4 && !Path.IsEmpty() && !strnicmp(*Path, "/Game", 5))
+		//	isUE4 = true;
 	}
+
+	unguard;
+
 	if (!SelectedDir.IsEmpty())
 	{
 		PackageTree->Expand(*SelectedDir);	//!! note: will not work at the moment because "Expand" works only after creation of UITreeView
 	}
 
-	if (isUE4)
+/*	if (isUE4)
 	{
 		// UE4 may have multiple root nodes for better layout
 //		PackageTree->HasRootNode(false);
 //??		PackageTree->Expand("/Game"); -- doesn't work unless TreeView is already created
-	}
+	} */
 
 	// "Tools" menu
 	UIMenu* toolsMenu = new UIMenu;
@@ -515,8 +572,9 @@ void UIPackageDialog::InitUI()
 			.SetCallback(BIND_LAMBDA([this]() { CloseDialog(CANCEL); }))
 	];
 
-	SortPackages(); // will call RefreshPackageListbox()
-//	RefreshPackageListbox();
+	// Finish sorting of packages - 2nd part of UIPackageDialog::SortPackages()
+	packageSortComplete.Wait();
+	UpdateUIAfterSort();
 
 	unguard;
 }
@@ -559,7 +617,7 @@ void UIPackageDialog::UpdateSelectedPackages()
 		FlatPackageList->GetSelectedPackages(SelectedPackages);
 		// Update currently selected directory in tree
 		if (SelectedPackages.Num())
-			SelectDirFromFilename(*SelectedPackages[0]->GetRelativeName());
+			SelectedDir = SelectedPackages[0]->GetPath();
 	}
 
 	unguard;
@@ -578,8 +636,8 @@ void UIPackageDialog::GetPackagesForSelectedFolder(PackageList& OutPackages)
 		// When root folder selected, "folder" is a empty string, we'll fill Packages with full list of packages
 		if (folderLen > 0)
 		{
-			FStaticString<MAX_PACKAGE_PATH> Path;
-			package->GetPath(Path);
+			//todo: use folder index!
+			const FString& Path = package->GetPath();
 			if (!Path.StartsWith(folder) || (Path.Len() != folderLen && Path[folderLen] != '/'))
 			{
 				// Not in this folder
@@ -588,23 +646,6 @@ void UIPackageDialog::GetPackagesForSelectedFolder(PackageList& OutPackages)
 		}
 
 		OutPackages.Add(package);
-	}
-}
-
-void UIPackageDialog::SelectDirFromFilename(const char* filename)
-{
-	// extract a directory name from 1st package name
-	char buffer[512];
-	appStrncpyz(buffer, filename, ARRAY_COUNT(buffer));
-	char* s = strrchr(buffer, '/');
-	if (s)
-	{
-		*s = 0;
-		SelectedDir = buffer;
-	}
-	else
-	{
-		SelectedDir = "";
 	}
 }
 
@@ -680,9 +721,14 @@ struct PackageSortHelper
 	int Index;
 };
 
+#define USE_FAST_SORTER 0
+
+#if !USE_FAST_SORTER
+
 static bool PackageSort_Reverse;
 static int  PackageSort_Column;
 
+// do not use 'switch' inside sorter function
 static int PackageSortFunction(const PackageSortHelper* pA, const PackageSortHelper* pB)
 {
 	const CGameFileInfo* A = pA->File;
@@ -717,9 +763,46 @@ static int PackageSortFunction(const PackageSortHelper* pA, const PackageSortHel
 	return code;
 }
 
+#else
+
+// This approach minimizes overhead of sort type selection in PackageSortFunction. Interestingly,
+// it doesn't provide enough speedup, but keeping the code just for possible future reference.
+
+#define SORTER0(argA, argB, ...) \
+	[](const PackageSortHelper* pA, const PackageSortHelper* pB) -> int \
+	{ \
+		const CGameFileInfo* A = argA->File; \
+		const CGameFileInfo* B = argB->File; \
+		int code = __VA_ARGS__; \
+		/* make sort stable */ \
+		if (code == 0) \
+			code = pA->Index - pB->Index; \
+		return code; \
+	}
+
+#define SORTER(...) \
+	{ SORTER0(pA, pB, __VA_ARGS__), SORTER0(pB, pA, __VA_ARGS__) }
+
+typedef int (*PackageSortFunction_t)(const PackageSortHelper*, const PackageSortHelper*);
+
+static const PackageSortFunction_t PackageSorter[][2] = {
+	SORTER(CGameFileInfo::CompareNames(*A, *B)),			// COLUMN_Name
+	SORTER(A->NumSkeletalMeshes - B->NumSkeletalMeshes),	// COLUMN_NumSkel
+	SORTER(A->NumStaticMeshes - B->NumStaticMeshes),		// COLUMN_NumStat,
+	SORTER(A->NumAnimations - B->NumAnimations),			// COLUMN_NumAnim
+	SORTER(A->NumTextures - B->NumTextures),				// COLUMN_NumTex
+	SORTER((A->SizeInKb - B->SizeInKb) + (A->ExtraSizeInKb - B->ExtraSizeInKb)), // COLUMN_Size
+};
+
+static_assert(ARRAY_COUNT(PackageSorter) == UIPackageList::COLUMN_Count, "Review PackageSorter");
+
+#endif // USE_FAST_SORTER
+
 // Stable sort of packages
 /*static*/ void UIPackageDialog::SortPackages(PackageList& List, int Column, bool Reverse)
 {
+	guard(SortPackagesInternal);
+
 	// prepare helper array
 	TArray<PackageSortHelper> SortedArray;
 	SortedArray.AddUninitialized(List.Num());
@@ -730,29 +813,38 @@ static int PackageSortFunction(const PackageSortHelper* pA, const PackageSortHel
 		S.Index = i;
 	}
 
+#if !USE_FAST_SORTER
 	PackageSort_Reverse = Reverse;
 	PackageSort_Column = Column;
 	SortedArray.Sort(PackageSortFunction);
+#else
+	SortedArray.Sort(PackageSorter[Column][int(Reverse)]);
+#endif
 
 	// copy sorted data back to List
 	for (int i = 0; i < List.Num(); i++)
 	{
 		List[i] = SortedArray[i].File;
 	}
+
+	unguard;
 }
 
 void UIPackageDialog::SortPackages()
 {
 	guard(UIPackageDialog::SortPackages);
-
 	UpdateSelectedPackages();
-
 	SortPackages(Packages, SortedColumn, ReverseSort);
+	UpdateUIAfterSort();
+	unguard;
+}
 
+void UIPackageDialog::UpdateUIAfterSort()
+{
+	guard(UIPackageDialog::UpdateUIAfterSort);
 	FlatPackageList->ShowSortArrow(SortedColumn, ReverseSort);
 	PackageListbox->ShowSortArrow(SortedColumn, ReverseSort);
 	RefreshPackageListbox();
-
 	unguard;
 }
 
@@ -905,7 +997,7 @@ void UIPackageDialog::OnExportFolderClicked()
 			cancelled = true;
 			break;
 		}
-		UnPackage* package = UnPackage::LoadPackage(*RelativeName, true);	// should always return non-NULL
+		UnPackage* package = UnPackage::LoadPackage(PackagesToExport[i], true);	// should always return non-NULL
 		if (package) UnrealPackages.Add(package);
 	}
 	if (cancelled || !UnrealPackages.Num())

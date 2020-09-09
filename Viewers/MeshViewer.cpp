@@ -1,11 +1,14 @@
 #include "Core.h"
-#include "UnrealClasses.h"
+#include "UnCore.h"
 
 #if RENDERING
 
+#include "UnObject.h"
+#include "UnrealMaterial/UnMaterial.h"
+
 #include "ObjectViewer.h"
 #include "../MeshInstance/MeshInstance.h"
-#include "MeshCommon.h"
+#include "Mesh/MeshCommon.h"
 
 #if HAS_UI
 #include "BaseDialog.h"
@@ -63,12 +66,16 @@ void CMeshViewer::Draw3D(float TimeDelta)
 	glPolygonMode(GL_FRONT_AND_BACK, Wireframe ? GL_LINE : GL_FILL);	//?? bWireframe is inside Inst, but used here only ?
 	DrawMesh(Inst);
 
+	// Reset highlighted material
+	Inst->HighlightMaterialIndex = -1;
+
 	unguard;
 }
 
 
 void CMeshViewer::DrawMesh(CMeshInstance *Inst)
 {
+	// Default DrawMesh implementation, not necessarily to be calles
 	Inst->Draw(DrawFlags);
 }
 
@@ -152,7 +159,7 @@ UIMenuItem* CMeshViewer::GetObjectMenu(UIMenuItem* menu)
 
 #endif // HAS_UI
 
-void CMeshViewer::ProcessKey(int key)
+void CMeshViewer::ProcessKey(unsigned key)
 {
 	guard(CMeshViewer::ProcessKey);
 	switch (key)
@@ -182,11 +189,24 @@ void CMeshViewer::ProcessKey(int key)
 
 void CMeshViewer::PrintMaterialInfo(int Index, UUnrealMaterial *Material, int NumFaces)
 {
+	bool bHighlight = false;
 	unsigned color = CMeshInstance::GetMaterialDebugColor(Index);
 	if (Material)
-		DrawText(TA_TopLeft, color, "  %d: %s (%s), %d tris", Index, Material->Name, Material->GetClassName(), NumFaces);
+	{
+		bool bClicked = DrawTextH(ETextAnchor::TopLeft, &bHighlight, color, "  %d: " S_HYPERLINK("%s (%s)") ", %d tris", Index, Material->Name, Material->GetClassName(), NumFaces);
+		if (bClicked)
+			JumpTo(Material);
+	}
 	else
-		DrawText(TA_TopLeft, color, "  %d: null, %d tris", Index, NumFaces);
+	{
+		DrawTextH(ETextAnchor::TopLeft, &bHighlight, color, "  %d: null, %d tris", Index, NumFaces);
+	}
+	if (bHighlight)
+	{
+		// HighlightMaterialIndex will be reset after mesh drawing. Can't reset it here because
+		// if mat_0 = highlight, mat_1 = no_highlight will cause mat_1 to overwrite mat_0 'true' value.
+		Inst->HighlightMaterialIndex = Index;
+	}
 }
 
 

@@ -1,8 +1,6 @@
 #ifndef __PACKAGE_DIALOG_H__
 #define __PACKAGE_DIALOG_H__
 
-#if HAS_UI
-
 class UIPackageList;
 
 class UIPackageDialog : public UIBaseDialog
@@ -71,16 +69,17 @@ protected:
 
 	void UpdateSelectedPackages();
 	void GetPackagesForSelectedFolder(PackageList& OutPackages);
-	void SelectDirFromFilename(const char* filename);
 	void RefreshPackageListbox();
+
+	// Package sort stuff
 	void SortPackages();
+	// Sort helpers
 	static void SortPackages(PackageList& List, int Column, bool Reverse);
+	void UpdateUIAfterSort();
 
 	UIPackageList& CreatePackageListControl(bool StripPath);
 
 	virtual void InitUI();
 };
-
-#endif // HAS_UI
 
 #endif // __PACKAGE_DIALOG_H__

@@ -1,13 +1,11 @@
 // Simple UI library.
-// Copyright (C) 2019 Konstantin Nosov
+// Copyright (C) 2020 Konstantin Nosov
 // Licensed under the BSD license. See LICENSE.txt file in the project root for full license information.
 
 #ifndef __BASE_DIALOG_H__
 #define __BASE_DIALOG_H__
 
 #include "Core.h"
-
-#if HAS_UI	// defined in Build.h, included from Core.h
 
 #include "Win32Types.h"
 #include "UnCore.h"					// for TArray and FString
@@ -676,7 +674,7 @@ protected:
 //    Items are stored inside UIMulticolumnListbox. Win32 object contains just number of items. Application
 //    works with UIMulticolumnListbox in this mode in exactly the same was as in "normal" mode, however
 //    work with control performed much faster.
-// 3. "True" virtual model with callbacks: create, SetVirtualMode, set callbacks. Set number of items, display.
+// 3. "True" virtual mode with callbacks: create, SetVirtualMode, set callbacks. Set number of items, display.
 //    Items are stored on the side which created this control. UIMulticolumnListbox and Win32 objects
 //    both holds only items count. This is the fastest mode, with lowest possible memory requirement.
 class UIMulticolumnListbox : public UIElement
@@ -1308,7 +1306,5 @@ protected:
 
 void UISetExceptionHandler(void (*Handler)());
 
-
-#endif // HAS_UI
 
 #endif // __BASE_DIALOG_H__

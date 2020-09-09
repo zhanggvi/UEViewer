@@ -1,5 +1,5 @@
 // Simple UI library.
-// Copyright (C) 2019 Konstantin Nosov
+// Copyright (C) 2020 Konstantin Nosov
 // Licensed under the BSD license. See LICENSE.txt file in the project root for full license information.
 
 #if _WIN32
@@ -52,8 +52,6 @@
   (warning: possibly uses STL)
 */
 
-
-#if HAS_UI
 
 //#define DEBUG_WINDOWS_ERRORS		MAX_DEBUG
 //#define DEBUG_MULTILIST_SEL			1
@@ -1583,11 +1581,23 @@ void UIMulticolumnListbox::RemoveItem(int itemIndex)
 
 void UIMulticolumnListbox::RemoveAllItems()
 {
+	guard(UIMulticolumnListbox::RemoveAllItems);
 	// remove items from local storage and from control
 	int numStrings = Items.Num();
 	if (numStrings > NumColumns)
 		Items.RemoveAt(NumColumns, numStrings - NumColumns);
-	if (Wnd) ListView_DeleteAllItems(Wnd);
+
+	if (Wnd)
+	{
+		if (!IsVirtualMode)
+		{
+			ListView_DeleteAllItems(Wnd);
+		}
+		else
+		{
+			ListView_SetItemCount(Wnd, 0);
+		}
+	}
 
 	// process selection
 	int selCount = SelectedItems.Num();
@@ -1603,6 +1613,7 @@ void UIMulticolumnListbox::RemoveAllItems()
 		if (SelChangedCallback)
 			SelChangedCallback(this);
 	}
+	unguard;
 }
 
 #if DEBUG_MULTILIST_SEL
@@ -2203,6 +2214,8 @@ static void LoadFolderIcons()
 
 void UITreeView::Create(UICreateContext& ctx)
 {
+	guard(UITreeView::Create);
+
 	Id = ctx.dialog->GenerateDialogId();
 
 	Wnd = ctx.MakeWindow(this, WC_TREEVIEW, "",
@@ -2231,12 +2244,17 @@ void UITreeView::Create(UICreateContext& ctx)
 	}
 
 	// add items
+	guard(CreateItems);
 	for (int i = 0; i < Items.Num(); i++)
 		CreateItem(*Items[i]);
+	unguard;
+
 	// set selection
 	TreeView_SelectItem(Wnd, SelectedItem->hItem);
 
 	UpdateEnabled();
+
+	unguard;
 }
 
 bool UITreeView::HandleCommand(int id, int cmd, LPARAM lParam)
@@ -3569,9 +3587,9 @@ void UISetExceptionHandler(void (*Handler)())
 		// sometimes when working with debugger, exception inside UI could not be passed outside,
 		// and program crashed bypassing out exception handler - always show error information in
 		// MAX_DEBUG mode
-		if (GErrorHistory[0])
+		if (GError.History[0])
 		{
-			appNotify("ERROR in WindowProc: %s\n", GErrorHistory);
+			appNotify("ERROR in WindowProc: %s\n", GError.History);
 		}
 		else
 		{
@@ -3752,6 +3770,3 @@ INT_PTR UIBaseDialog::WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
 	unguard;
 }
-
-
-#endif // HAS_UI

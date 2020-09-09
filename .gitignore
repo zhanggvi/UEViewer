@@ -1,4 +1,5 @@
 # Some temporaty directories and directories with data
+data
 data/
 obj/
 bak/
@@ -23,10 +24,15 @@ Screenshots/
 notify.log
 umodel.cfg
 
+# Visual Studio files
+**/.vs/*
+!.vs/CppProperties.json
+!.vs/launch.vs.json
+!.vs/tasks.vs.json
+
 # Executable files and pdb
 umodel.pdb
 SDL2.dll
-.vs/
 Tools/**/*.exe
 Tools/**/*.pdb
 *todo.md
@@ -34,3 +40,7 @@ Tools/**/*.pdb
 # UI_Dev
 Tools/UITest/vs/Debug/
 Tools/UITest/vs/Release/
+
+# ooz library
+libs/oodle/*.h
+libs/oodle/*.cpp

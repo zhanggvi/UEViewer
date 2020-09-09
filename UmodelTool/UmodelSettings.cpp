@@ -12,7 +12,9 @@
 #define EXPORT_DIRECTORY	"UmodelExport"
 #define SAVE_DIRECTORY		"UmodelSaved"
 
-static void SetPathOption(FString& where, const char* value)
+// When bUseCwd is true, relative path will be computed based on current working directory.
+// Currently this option is primarily intended for Linux as Windows version always use current directory as a base.
+static void SetPathOption(FString& where, const char* value, bool bUseCwd = false)
 {
 	// determine whether absolute path is used
 	FStaticString<512> value2;
@@ -42,7 +44,12 @@ static void SetPathOption(FString& where, const char* value)
 			strcpy(path, ".");	// path is too long, or other error occurred
 #else
 		// for Unix OS, store everything to the HOME directory ("~/...")
-		if (const char* s = getenv("HOME"))
+		if (bUseCwd || (!value2.IsEmpty() && value2[0] == '.' && value2[1] == '/'))
+		{
+			// just use working dir
+			strcpy(path, ".");
+		}
+		else if (const char* s = getenv("HOME"))
 		{
 			strcpy(path, s);
 		}
@@ -82,7 +89,7 @@ static void SetPathOption(FString& where, const char* value)
 
 void CStartupSettings::SetPath(const char* path)
 {
-	SetPathOption(GamePath, path);
+	SetPathOption(GamePath, path, true);
 }
 
 void CStartupSettings::Reset()
@@ -94,6 +101,7 @@ void CStartupSettings::Reset()
 	UseAnimation = true;
 	UseStaticMesh = true;
 	UseTexture = true;
+	UseMorphTarget = true;
 	UseLightmapTexture = true;
 
 	UseSound = false;
@@ -202,7 +210,7 @@ void CUmodelSettings::Load()
 	FString ConfigFile;
 	SetPathOption(ConfigFile, CONFIG_FILE);
 
-	FArchive* Ar = new FFileReader(*ConfigFile, FAO_NoOpenError);
+	FArchive* Ar = new FFileReader(*ConfigFile, FAO_NoOpenError); // can't use FAO_TextFile because of FFileReader::IsEof will not work fine with it
 	if (!Ar->IsOpen())
 	{
 		delete Ar;

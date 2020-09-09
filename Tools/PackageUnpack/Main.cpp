@@ -1,5 +1,5 @@
 #include "Core.h"
-#include "UnrealClasses.h"
+#include "UnCore.h"
 #include "UnPackage.h"
 #include "GameDatabase.h"
 
@@ -24,7 +24,7 @@ static void CopyStream(FArchive *Src, FILE *Dst, int Count)
 
 int UE4UnversionedPackage(int verMin, int verMax)
 {
-	appError("Unversioned UE4 packages are not supported. Please restart UModel and select UE4 version in range %d-%d using UI or command line.", verMin, verMax);
+	appErrorNoLog("Unversioned UE4 packages are not supported. Please restart UModel and select UE4 version in range %d-%d using UI or command line.", verMin, verMax);
 	return -1;
 }
 
@@ -193,7 +193,7 @@ int main(int argc, char **argv)
 		int uncompressedStart = Summary.CompressedChunks[0].UncompressedOffset;
 
 		// use game file system to access file to avoid any troubles with locating file
-		const CGameFileInfo* info = appFindGameFile(Package->Filename);
+		const CGameFileInfo* info = CGameFileInfo::Find(*Package->GetFilename());
 		FArchive* h;
 		if (info)
 		{
@@ -319,16 +319,7 @@ int main(int argc, char **argv)
 
 #if DO_GUARD
 	} CATCH {
-		if (GErrorHistory[0])
-		{
-//			printf("ERROR: %s\n", GErrorHistory);
-			appNotify("ERROR: %s\n", GErrorHistory);
-		}
-		else
-		{
-//			printf("Unknown error\n");
-			appNotify("Unknown error\n");
-		}
+		GError.StandardHandler();
 		exit(1);
 	}
 #endif

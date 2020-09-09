@@ -15,6 +15,7 @@ TArray<UnPackage*> GFullyLoadedPackages;
 bool LoadWholePackage(UnPackage* Package, IProgressCallback* progress)
 {
 	guard(LoadWholePackage);
+	PROFILE_LABEL(*Package->GetFilename());
 
 	if (GFullyLoadedPackages.FindItem(Package) >= 0) return true;	// already loaded
 
@@ -39,12 +40,17 @@ bool LoadWholePackage(UnPackage* Package, IProgressCallback* progress)
 
 	return true;
 
-	unguardf("%s", Package->Name);
+	unguardf("%s", *Package->GetFilename());
 }
 
 void ReleaseAllObjects()
 {
 	guard(ReleaseAllObjects);
+
+	// It is possible that no objects were loaded, however we have fully loaded packages - always clean up the list
+	GFullyLoadedPackages.Empty();
+
+	if (!UObject::GObjObjects.Num()) return;
 
 #if 0
 	appPrintf("Memory: allocated " FORMAT_SIZE("d") " bytes in %d blocks\n", GTotalAllocationSize, GTotalAllocationCount);
@@ -53,8 +59,6 @@ void ReleaseAllObjects()
 	for (int i = UObject::GObjObjects.Num() - 1; i >= 0; i--)
 		delete UObject::GObjObjects[i];
 	UObject::GObjObjects.Empty();
-
-	GFullyLoadedPackages.Empty();
 
 #if 0
 	// verify that all object pointers were set to NULL
@@ -68,7 +72,17 @@ void ReleaseAllObjects()
 		}
 	}
 #endif
-	appPrintf("Memory: allocated " FORMAT_SIZE("d") " bytes in %d blocks\n", GTotalAllocationSize, GTotalAllocationCount);
+
+	// Print currently used memory statistics, but only if it differs from previous one.
+	// This lets to avoid console spam when doing export of packages which has nothing exportable inside.
+	static size_t lastAllocsSize = 0;
+	static int lastAllocsCount = 0;
+	if (GTotalAllocationSize != lastAllocsSize || GTotalAllocationCount != lastAllocsCount)
+	{
+		lastAllocsSize = GTotalAllocationSize;
+		lastAllocsCount = GTotalAllocationCount;
+		appPrintf("Memory: allocated " FORMAT_SIZE("d") " bytes in %d blocks\n", GTotalAllocationSize, GTotalAllocationCount);
+	}
 //	appDumpMemoryAllocations();
 
 	unguard;
@@ -227,19 +241,23 @@ static void ScanPackageExports(UnPackage* package, CGameFileInfo* file)
 	} */
 }
 
-//void PrintStringHashDistribution();
-
 bool ScanContent(const TArray<const CGameFileInfo*>& Packages, IProgressCallback* Progress)
 {
+	guard(ScanContent);
+
 #if PROFILE
 	appResetProfiler();
 #endif
 	bool cancelled = false;
 	bool scanned = false; // says if anywhing was scanned or not, just for profiler message
+
+	// Preallocate PackageMap
+	UnPackage::ReservePackageMap(Packages.Num());
+
 	for (int i = 0; i < Packages.Num(); i++)
 	{
 		CGameFileInfo* file = const_cast<CGameFileInfo*>(Packages[i]);		// we'll modify this structure here
-		if (file->PackageScanned) continue;
+		if (file->IsPackageScanned) continue;
 
 		// Update progress dialog
 		FStaticString<MAX_PACKAGE_PATH> RelativeName;
@@ -250,7 +268,7 @@ bool ScanContent(const TArray<const CGameFileInfo*>& Packages, IProgressCallback
 			break;
 		}
 
-		file->PackageScanned = true;
+		file->IsPackageScanned = true;
 
 		if (file->Package)
 		{
@@ -259,7 +277,7 @@ bool ScanContent(const TArray<const CGameFileInfo*>& Packages, IProgressCallback
 		}
 		else
 		{
-			UnPackage* package = UnPackage::LoadPackage(*RelativeName, /*silent=*/ true);	// should always return non-NULL
+			UnPackage* package = UnPackage::LoadPackage(file, /*silent=*/ true);	// should always return non-NULL
 			if (!package) continue;		// should not happen
 			ScanPackageExports(package, file);
 		#if 0
@@ -273,12 +291,17 @@ bool ScanContent(const TArray<const CGameFileInfo*>& Packages, IProgressCallback
 		}
 		scanned = true;
 	}
-//	PrintStringHashDistribution();
 #if PROFILE
 	if (scanned)
 		appPrintProfiler("Scanned packages");
 #endif
+#if 0
+	void PrintStringHashDistribution();
+	PrintStringHashDistribution();
+#endif
 	return !cancelled;
+
+	unguard;
 }
 
 

@@ -6,11 +6,16 @@
 
 #include "Exporters.h"
 
+#include "Parallel.h"
 
 // configuration variables
 bool GExportScripts      = false;
 bool GExportLods         = false;
 bool GDontOverwriteFiles = false;
+
+bool GExportInProgress   = false;
+
+bool GDummyExport        = false;
 
 
 /*-----------------------------------------------------------------------------
@@ -18,23 +23,24 @@ bool GDontOverwriteFiles = false;
 -----------------------------------------------------------------------------*/
 
 #define MAX_EXPORTERS		20
+//#define DEBUG_DUP_FINDER	1
 
 struct CExporterInfo
 {
-	const char		*ClassName;
+	const char* ClassName;
 	ExporterFunc_t	Func;
 };
 
 static CExporterInfo exporters[MAX_EXPORTERS];
 static int numExporters = 0;
 
-void RegisterExporter(const char *ClassName, ExporterFunc_t Func)
+void RegisterExporter(const char* ClassName, ExporterFunc_t Func)
 {
 	guard(RegisterExporter);
 	assert(numExporters < MAX_EXPORTERS);
-	CExporterInfo &Info = exporters[numExporters];
+	CExporterInfo& Info = exporters[numExporters];
 	Info.ClassName = ClassName;
-	Info.Func      = Func;
+	Info.Func = Func;
 	numExporters++;
 	unguard;
 }
@@ -78,11 +84,16 @@ struct ExportContext
 		Reset();
 	}
 
+	void BeginExport()
+	{
+		Objects.Empty(1024);
+	}
+
 	void Reset()
 	{
 		LastExported = NULL;
 		NumSkippedObjects = 0;
-		Objects.Empty(1024);
+		Objects.Empty();
 		memset(ObjectHash, -1, sizeof(ObjectHash));
 	}
 
@@ -136,13 +147,47 @@ struct ExportContext
 
 static ExportContext ctx;
 
-void BeginExport()
+static bool OnObjectLoad(UObject* Obj)
 {
+	guard(OnObjectLoad);
+
+	assert(Obj);
+	const char* Class = Obj->GetClassName();
+
+	if (strncmp(Class, "Texture", 7) == 0)
+	{
+		// For UE3/UE4, the same texture may be reused many times from different materials.
+		// In test case, 580 textures were loaded 18000 times. This callback allows to replace
+		// these textures with dummies as soon as they've got exported
+		bool result = IsObjectExported(Obj) == false;
+//		if (!result) appPrintf("SKIP: %s\n", Obj->Name);
+		return result;
+	}
+	return true;
+
+	unguard;
+}
+
+void BeginExport(bool bBatch)
+{
+	GExportInProgress = bBatch; // only signal that we're doing export if not doing that from the viewer
+	GBeforeLoadObjectCallback = OnObjectLoad;
+	ctx.BeginExport();
 	ctx.startTime = appMilliseconds();
 }
 
 void EndExport(bool profile)
 {
+//	assert(GExportInProgress); - in non-batch export this might be 'false'
+
+#if THREADING
+	// Wait for all workers to complete
+	ThreadPool::WaitForCompletion();
+#endif
+
+	GExportInProgress = false;
+	GBeforeLoadObjectCallback = NULL;
+
 	if (profile)
 	{
 		assert(ctx.startTime);
@@ -174,46 +219,113 @@ bool IsObjectExported(const UObject* Obj)
 }
 
 //todo: move to ExportContext and reset with ctx.Reset()?
-struct UniqueNameList
+
+// Use CRC32 for hashing, from zlib
+extern "C" unsigned long crc32(unsigned long crc, const byte* buf, unsigned int len);
+
+struct CUniqueNameList
 {
-	UniqueNameList()
+	typedef uint32 Hash_t;
+
+	CUniqueNameList()
 	{
 		Items.Empty(1024);
 	}
 
 	struct Item
 	{
-		FString Name;
-		int Count;
+		Item()
+		{
+			memset(this, 0, sizeof(*this));
+		}
+
+		FString			Name;
+		int				Count;
+		Hash_t			FirstHash;		// use separate Hash_t to avoid using TArray as much as possible
+		TArray<Hash_t>	OtherHashes;
 	};
 	TArray<Item> Items;
 
-	int RegisterName(const char *Name)
+	static Hash_t GetHash(const byte* Buf, int Size)
 	{
-		for (int i = 0; i < Items.Num(); i++)
+		Hash_t crc = crc32(0, NULL, 0);
+		crc = crc32(crc, Buf, (unsigned)Size);
+		return crc;
+	}
+
+	int RegisterName(const char* Name, const TArray<byte>& Meta)
+	{
+		guard(CUniqueNameList::RegisterName);
+
+		// Get hash of the object. Value 0 will mean "no metadata present".
+		Hash_t Hash = 0;
+		if (Meta.Num() != 0)
 		{
-			Item &V = Items[i];
+			Hash = GetHash(Meta.GetData(), Meta.Num());
+		}
+
+		// Find the object using name id
+		Item* foundItem = NULL;
+		for (Item& V : Items)
+		{
 			if (V.Name == Name)
 			{
-				return ++V.Count;
+				foundItem = &V;
+				break;
 			}
 		}
-		Item *N = new (Items) Item;
-		N->Name = Name;
-		N->Count = 1;
-		return 1;
+
+		if (foundItem == NULL)
+		{
+			// New item
+			Item *N = new (Items) Item();
+			N->Name = Name;
+			N->Count = 1;
+			N->FirstHash = Hash;
+			// Return '1' indicating that this is first appearance of the object name
+			return 1;
+		}
+
+		// Object with same name already exists, walk over hashes to find match
+		if (Hash == 0)
+		{
+			// No hash, treat all objects as unique
+			return ++foundItem->Count;
+		}
+
+		if (foundItem->FirstHash == Hash)
+			return 1;
+
+		for (int i = 0; i < foundItem->OtherHashes.Num(); i++)
+		{
+			if (foundItem->OtherHashes[i] == Hash)
+				return i + 2;	// found this hash
+		}
+		// This hash wasn't found
+		foundItem->OtherHashes.Add(Hash);
+		foundItem->Count++;
+		assert(foundItem->Count == foundItem->OtherHashes.Num() + 1);
+		return foundItem->Count;
+
+		unguard;
 	}
 };
 
 bool ExportObject(const UObject *Obj)
 {
 	guard(ExportObject);
+	PROFILE_LABEL(Obj->GetClassName());
 
 	if (!Obj) return false;
 	if (strnicmp(Obj->Name, "Default__", 9) == 0)	// default properties object, nothing to export
 		return true;
 
-	static UniqueNameList ExportedNames;
+	// Check if exactly the same object was already exported. It refers to package.object and not
+	// taking into account that the same object may reside in different packages in cooked UE3 game.
+	if (IsObjectExported(Obj))
+		return true;
+
+	static CUniqueNameList ExportedNames;
 
 	// For "uncook", different packages may have copies of the same object, which are stored with different quality.
 	// For example, Gears3 has anim sets which cooked with different tracks into different maps. To be able to export
@@ -232,21 +344,36 @@ bool ExportObject(const UObject *Obj)
 			char ExportPath[1024];
 			strcpy(ExportPath, GetExportPath(Obj));
 			const char* ClassName = Obj->GetClassName();
-			// check for duplicate name
-			// get name unique index
-			char uniqueName[1024];
-			appSprintf(ARRAY_ARG(uniqueName), "%s/%s.%s", ExportPath, Obj->Name, ClassName);
 
+			// Check for duplicate name
 			const char* OriginalName = NULL;
 			if (bAddUniqueSuffix)
 			{
+				// Get object's unique key from its name
+				char uniqueName[1024];
+				appSprintf(ARRAY_ARG(uniqueName), "%s/%s.%s", ExportPath, Obj->Name, ClassName);
+
+				// Get object metadata for better detection of duplicates
+				FMemWriter MetaCollector;
+				Obj->GetMetadata(MetaCollector);
+
 				// Add unique numeric suffix when needed
-				int uniqueIdx = ExportedNames.RegisterName(uniqueName);
+				const TArray<byte>& Meta = MetaCollector.GetData();
+				int uniqueIdx = ExportedNames.RegisterName(uniqueName, Meta);
+#if DEBUG_DUP_FINDER
+				char buf[512];
+				appSprintf(ARRAY_ARG(buf), "%s -> %d", uniqueName, uniqueIdx);
+				if (Meta.Num())
+				{
+					DUMP_MEM_BYTES(&Meta[0], Meta.Num(), buf);
+				}
+#endif // DEBUG_DUP_FINDER
 				if (uniqueIdx >= 2)
 				{
+					// Find existing object name with same metadata, or register a new name
 					appSprintf(ARRAY_ARG(uniqueName), "%s_%d", Obj->Name, uniqueIdx);
 					appPrintf("Duplicate name %s found for class %s, renaming to %s\n", Obj->Name, ClassName, uniqueName);
-					// HACK: temporary replace object name with unique one
+					//?? HACK: temporary replace object name with unique one
 					OriginalName = Obj->Name;
 					const_cast<UObject*>(Obj)->Name = uniqueName;
 				}
@@ -276,10 +403,10 @@ bool ExportObject(const UObject *Obj)
 
 static char BaseExportDir[512];
 
-bool GUncook    = false;
+bool GUncook = false;
 bool GUseGroups = false;
 
-void appSetBaseExportDirectory(const char *Dir)
+void appSetBaseExportDirectory(const char* Dir)
 {
 	strcpy(BaseExportDir, Dir);
 }
@@ -300,7 +427,8 @@ const char* GetExportPath(const UObject* Obj)
 		// Special path for UE4 games - its packages are usually have 1 asset per file, plus
 		// package names could be duplicated across directory tree, with use of full package
 		// paths to identify packages.
-		const char* PackageName = Obj->Package->Filename;
+		FString PackageNameStr = *Obj->Package->GetFilename();
+		const char* PackageName = *PackageNameStr;
 		// Package name could be:
 		// a) /(GameName|Engine)/Content/... - when loaded from pak file
 		// b) [[GameName/]Content/]... - when not packaged to pak file
@@ -395,6 +523,7 @@ const char* GetExportFileName(const UObject* Obj, const char* fmt, ...)
 }
 
 
+//todo: the function is not used
 bool CheckExportFilePresence(const UObject* Obj, const char* fmt, ...)
 {
 	va_list	argptr;
@@ -441,7 +570,13 @@ FArchive* CreateExportArchive(const UObject* Obj, unsigned FileOptions, const ch
 		{
 			appPrintf("Export: file already exists %s\n", filename);
 			ctx.NumSkippedObjects++;
+			return NULL;
 		}
+	}
+
+	if (GDummyExport)
+	{
+		return new FDummyArchive();
 	}
 
 	appMakeDirectoryForFile(filename);

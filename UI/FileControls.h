@@ -1,11 +1,10 @@
 // Simple UI library.
-// Copyright (C) 2019 Konstantin Nosov
+// Copyright (C) 2020 Konstantin Nosov
 // Licensed under the BSD license. See LICENSE.txt file in the project root for full license information.
 
 #ifndef __FILE_CONTROLS_H__
 #define __FILE_CONTROLS_H__
 
-#if HAS_UI
 
 class UIFilePathEditor : public UIGroup
 {
@@ -99,7 +98,5 @@ FString ShowFileSelectionDialog(
 	const FString& Title,
 	const TArray<FString>& Filters);
 
-
-#endif // HAS_UI
 
 #endif // __FILE_CONTROLS_H__

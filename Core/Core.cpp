@@ -16,6 +16,13 @@
 #include <windows.h>
 #endif // VSTUDIO_INTEGRATION
 
+#if THREADING
+
+#include "Parallel.h"
+
+static CMutex GLogMutex;
+
+#endif // THREADING
 
 static FILE *GLogFile = NULL;
 
@@ -31,12 +38,19 @@ void appOpenLogFile(const char *filename)
 
 void appPrintf(const char *fmt, ...)
 {
+	guard(appPrintf);
+
 	va_list	argptr;
 	va_start(argptr, fmt);
 	char buf[4096];
 	int len = vsnprintf(ARRAY_ARG(buf), fmt, argptr);
 	va_end(argptr);
-	if (len < 0 || len >= ARRAY_COUNT(buf) - 1) appError("appPrintf: buffer overflow");
+	if (len < 0 || len >= ARRAY_COUNT(buf) - 1) appErrorNoLog("appPrintf: buffer overflow");
+
+#if THREADING
+	// Make appPrintf thread-safe
+	CMutex::ScopedLock Lock(GLogMutex);
+#endif
 
 	fwrite(buf, len, 1, stdout);
 	if (GLogFile) fwrite(buf, len, 1, GLogFile);
@@ -45,6 +59,8 @@ void appPrintf(const char *fmt, ...)
 	if (IsDebuggerPresent())
 		OutputDebugString(buf);
 #endif
+
+	unguard;
 }
 
 
@@ -52,7 +68,7 @@ void appPrintf(const char *fmt, ...)
 	Simple error/notification functions
 -----------------------------------------------------------------------------*/
 
-bool GIsSwError = false;			// software-generated error
+CErrorContext GError;
 
 void appError(const char *fmt, ...)
 {
@@ -61,9 +77,9 @@ void appError(const char *fmt, ...)
 	char buf[4096];
 	int len = vsnprintf(ARRAY_ARG(buf), fmt, argptr);
 	va_end(argptr);
-	if (len < 0 || len >= ARRAY_COUNT(buf) - 1) appError("appError: buffer overflow");
+	if (len < 0 || len >= ARRAY_COUNT(buf) - 1) appErrorNoLog("appError: buffer overflow");
 
-	GIsSwError = true;
+	GError.IsSwError = true;
 
 #if VSTUDIO_INTEGRATION
 	if (IsDebuggerPresent())
@@ -75,8 +91,8 @@ void appError(const char *fmt, ...)
 
 #if DO_GUARD
 //	appNotify("ERROR: %s\n", buf);
-	strcpy(GErrorHistory, buf);
-	appStrcatn(ARRAY_ARG(GErrorHistory), "\n");
+	strcpy(GError.History, buf);
+	appStrcatn(ARRAY_ARG(GError.History), "\n");
 	THROW;
 #else
 	fprintf(stderr, "Fatal Error: %s\n", buf);
@@ -86,18 +102,18 @@ void appError(const char *fmt, ...)
 }
 
 
-static char NotifyBuf[512];
+static char NotifyHeader[512];
 
 void appSetNotifyHeader(const char *fmt, ...)
 {
 	if (!fmt)
 	{
-		NotifyBuf[0] = 0;
+		NotifyHeader[0] = 0;
 		return;
 	}
 	va_list	argptr;
 	va_start(argptr, fmt);
-	vsnprintf(ARRAY_ARG(NotifyBuf), fmt, argptr);
+	vsnprintf(ARRAY_ARG(NotifyHeader), fmt, argptr);
 	va_end(argptr);
 }
 
@@ -109,56 +125,77 @@ void appNotify(const char *fmt, ...)
 	char buf[4096];
 	int len = vsnprintf(ARRAY_ARG(buf), fmt, argptr);
 	va_end(argptr);
-	if (len < 0 || len >= ARRAY_COUNT(buf) - 1) appError("appNotify: buffer overflow");
+	if (len < 0 || len >= ARRAY_COUNT(buf) - 1) appErrorNoLog("appNotify: buffer overflow");
 
 	fflush(stdout);
+
+#if THREADING
+	// Make appPrintf thread-safe
+	CMutex::ScopedLock Lock(GLogMutex);
+#endif
 
 	// a bit ugly code: printing the same thing into 3 streams
 
 	// print to notify file
 	if (FILE *f = fopen("notify.log", "a"))
 	{
-		if (NotifyBuf[0])
-			fprintf(f, "\n******** %s ********\n\n", NotifyBuf);
+		if (NotifyHeader[0])
+			fprintf(f, "\n******** %s ********\n\n", NotifyHeader);
 		fprintf(f, "%s\n", buf);
 		fclose(f);
 	}
 	// print to log file
 	if (GLogFile)
 	{
-		if (NotifyBuf[0])
-			fprintf(GLogFile, "******** %s ********\n", NotifyBuf);
+		if (NotifyHeader[0])
+			fprintf(GLogFile, "******** %s ********\n", NotifyHeader);
 		fprintf(GLogFile, "*** %s\n", buf);
 		fflush(GLogFile);
 	}
 	// print to console
-	if (NotifyBuf[0])
-		fprintf(stderr, "******** %s ********\n", NotifyBuf);
+	if (NotifyHeader[0])
+		fprintf(stderr, "******** %s ********\n", NotifyHeader);
 	fprintf(stderr, "*** %s\n", buf);
 	fflush(stderr);
 	// clean notify header
-	NotifyBuf[0] = 0;
+	NotifyHeader[0] = 0;
 }
 
-
-char GErrorHistory[2048];
-static bool WasError = false;
-
-static void LogHistory(const char *part)
+void CErrorContext::StandardHandler()
 {
-	if (!GErrorHistory[0]) strcpy(GErrorHistory, "General Protection Fault !\n");
-	appStrcatn(ARRAY_ARG(GErrorHistory), part);
+	void (*PrintFunc)(const char*, ...);
+	PrintFunc = GError.SuppressLog ? appPrintf : appNotify;
+	// appNotify does some markup itself, add explicit marker for pure appPrintf
+	const char* Marker = GError.SuppressLog ? "\n*** " : "";
+
+	if (GError.History[0])
+	{
+//		printf("ERROR: %s\n", GError.History);
+		PrintFunc("%sERROR: %s\n", Marker, GError.History);
+	}
+	else
+	{
+//		printf("Unknown error\n");
+		PrintFunc("%sUnknown error\n", Marker);
+	}
+}
+
+#if DO_GUARD
+
+void CErrorContext::LogHistory(const char *part)
+{
+	if (!History[0])
+		strcpy(History, "General Protection Fault !\n");
+	appStrcatn(ARRAY_ARG(History), part);
 }
 
 void appUnwindPrefix(const char *fmt)
 {
 	char buf[512];
-	appSprintf(ARRAY_ARG(buf), WasError ? " <- %s:" : "%s:", fmt);
-	LogHistory(buf);
-	WasError = false;
+	appSprintf(ARRAY_ARG(buf), GError.FmtNeedArrow ? " <- %s: " : "%s: ", fmt);
+	GError.LogHistory(buf);
+	GError.FmtNeedArrow = false;
 }
-
-#if DO_GUARD
 
 void appUnwindThrow(const char *fmt, ...)
 {
@@ -166,7 +203,7 @@ void appUnwindThrow(const char *fmt, ...)
 	va_list argptr;
 
 	va_start(argptr, fmt);
-	if (WasError)
+	if (GError.FmtNeedArrow)
 	{
 		strcpy(buf, " <- ");
 		vsnprintf(buf+4, ARRAY_COUNT(buf)-4, fmt, argptr);
@@ -174,10 +211,10 @@ void appUnwindThrow(const char *fmt, ...)
 	else
 	{
 		vsnprintf(buf, ARRAY_COUNT(buf), fmt, argptr);
-		WasError = true;
+		GError.FmtNeedArrow = true;
 	}
 	va_end(argptr);
-	LogHistory(buf);
+	GError.LogHistory(buf);
 
 	THROW;
 }
@@ -489,7 +526,7 @@ void appParseResponseFile(const char* filename, int& outArgc, const char**& outA
 	FILE* f = fopen(filename, "r");
 	if (!f)
 	{
-		appError("Unable to find command line file \"%s\"", filename);
+		appErrorNoLog("Unable to find command line file \"%s\"", filename);
 	}
 	// Determine file size
 	fseek(f, 0, SEEK_END);
@@ -501,7 +538,7 @@ void appParseResponseFile(const char* filename, int& outArgc, const char**& outA
 	len = fread(buffer, 1, len, f);
 	if (len == 0)
 	{
-		appError("Unable to read command line file \"%s\"", filename);
+		appErrorNoLog("Unable to read command line file \"%s\"", filename);
 	}
 	fclose(f);
 	buffer[len] = 0;

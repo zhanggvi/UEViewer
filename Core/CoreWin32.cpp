@@ -401,7 +401,7 @@ long win32ExceptFilter(struct _EXCEPTION_POINTERS *info)
 	}
 #endif // VSTUDIO_INTEGRATION
 
-	if (GIsSwError) return EXCEPTION_EXECUTE_HANDLER;		// no interest to thread context when software-generated errors
+	if (GError.IsSwError) return EXCEPTION_EXECUTE_HANDLER;		// no interest to thread context when software-generated errors
 
 	// if FPU exception occurred, _clearfp() is required (otherwise, exception will be re-raised again)
 	_clearfp();
@@ -447,11 +447,11 @@ long win32ExceptFilter(struct _EXCEPTION_POINTERS *info)
 		// log error
 		CONTEXT* ctx = info->ContextRecord;
 #ifndef _WIN64
-		appSprintf(ARRAY_ARG(GErrorHistory), "%s (%08X) at %s\n",
+		appSprintf(ARRAY_ARG(GError.History), "%s (%08X) at %s\n",
 			excName, info->ExceptionRecord->ExceptionCode, appSymbolName(ctx->Eip)
 		);
 #else
-		appSprintf(ARRAY_ARG(GErrorHistory), "%s (%08X) at %s\n",
+		appSprintf(ARRAY_ARG(GError.History), "%s (%08X) at %s\n",
 			excName, info->ExceptionRecord->ExceptionCode, appSymbolName(ctx->Rip)
 		);
 #endif // _WIN64
@@ -489,6 +489,8 @@ void appInitPlatform()
 	// To catch such exceptions, hook abort() function.
 	signal(SIGABRT, AbortHandler);
 #endif // VSTUDIO_INTEGRATION
+	// Increase standard 512 open file limit. Note: it seems it can't be increased more than 2048 (stackoverflow says).
+	_setmaxstdio(1024);
 }
 
 void appCopyTextToClipboard(const char* text)
@@ -548,7 +550,7 @@ enum { CRT_FILE_SIZE = (sizeof(char*)*3 + sizeof(int)*5) };
 
 extern "C" FILE* __cdecl __acrt_iob_func(unsigned Index)
 {
-	return (FILE*)((char*)__iob_func() + Index * CRT_FILE_SIZE);
+	return (FILE*)((char*)__iob_func() + Index * Align(CRT_FILE_SIZE, sizeof(char*)));
 }
 
 #endif // OLDCRT

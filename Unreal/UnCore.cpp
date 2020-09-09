@@ -51,14 +51,28 @@ FArray::~FArray()
 	MaxCount  = 0;
 }
 
-void FArray::MoveData(FArray& Other)
+void FArray::MoveData(FArray& Other, int elementSize)
 {
-	DataPtr = Other.DataPtr;
-	DataCount = Other.DataCount;
-	MaxCount = Other.MaxCount;
-	Other.DataPtr = NULL;
-	Other.DataCount = 0;
-	Other.MaxCount = 0;
+	if (!Other.IsStatic())
+	{
+		// Can simply reassign allocated data
+		DataPtr = Other.DataPtr;
+		DataCount = Other.DataCount;
+		MaxCount = Other.MaxCount;
+		Other.DataPtr = NULL;
+		Other.DataCount = 0;
+		Other.MaxCount = 0;
+	}
+	else
+	{
+		// Working with "static" array, should copy data instead
+		int dataSize = Other.DataCount * elementSize;
+		DataPtr = appMallocNoInit(dataSize);
+		DataCount = Other.DataCount;
+		MaxCount = Other.DataCount;
+		memcpy(DataPtr, Other.DataPtr, dataSize);
+		Other.DataCount = 0;
+	}
 }
 
 void FArray::Empty(int count, int elementSize)
@@ -95,7 +109,7 @@ void FArray::Empty(int count, int elementSize)
 
 	if (count)
 	{
-		DataPtr = appMalloc(count * elementSize);
+		DataPtr = appMallocNoInit(count * elementSize);
 	}
 
 	unguardf("%d x %d", count, elementSize);
@@ -107,45 +121,52 @@ void FArray::Empty(int count, int elementSize)
 // upper level functions like Insert()
 void FArray::GrowArray(int count, int elementSize)
 {
-	guard(FArray::GrowArray);
-	assert(count > 0);
-
-	int prevCount = MaxCount;
+	//todo: remove appError's later (added 6.07.2020)
+	if (count <= 0)
+		appError("FArray::GrowArray failed: count = %d", count);
 
 	// check for available space
 	int newCount = DataCount + count;
-	if (newCount > MaxCount)
+
+	if (newCount <= MaxCount)
+		return;
+
+	// Not enough space, resize ...
+	// Allow small initial size of array
+	const int minCount = 4;
+	if (newCount > minCount)
 	{
-		// Not enough space, resize ...
-		// Allow small initial size of array
-		const int minCount = 4;
-		if (newCount > minCount)
+		if (DataCount > 64 && count == 1)
+		{
+			// Array is large enough, and still growing - do the larger step
+			int increment = DataCount / 8 + 16;
+			MaxCount = Align(DataCount + increment, 16);
+		}
+		else
 		{
 			MaxCount = Align(DataCount + count, 16) + 16;
 		}
-		else
-		{
-			MaxCount = minCount;
-		}
-		// Align memory block to reduce fragmentation
-		int dataSize = Align(MaxCount * elementSize, 16);
-		// Recompute MaxCount in a case if alignment increases its capacity
-		MaxCount = dataSize / elementSize;
-		// Reallocate memory
-		if (!IsStatic())
-		{
-			DataPtr = appRealloc(DataPtr, dataSize);
-		}
-		else
-		{
-			// "static" array becomes non-static
-			void* oldData = DataPtr; // this is a static pointer
-			DataPtr = appMalloc(dataSize);
-			memcpy(DataPtr, oldData, prevCount * elementSize);
-		}
 	}
-
-	unguardf("%d x %d", count, elementSize);
+	else
+	{
+		MaxCount = minCount;
+	}
+	// Align memory block to reduce fragmentation
+	int dataSize = Align(MaxCount * elementSize, 16);
+	// Recompute MaxCount in a case if alignment increases its capacity
+	MaxCount = dataSize / elementSize;
+	// Reallocate memory
+	if (!IsStatic())
+	{
+		DataPtr = appRealloc(DataPtr, dataSize);
+	}
+	else
+	{
+		// "static" array becomes non-static
+		void* oldData = DataPtr; // this is a static pointer
+		DataPtr = appMallocNoInit(dataSize);
+		memcpy(DataPtr, oldData, DataCount * elementSize);
+	}
 }
 
 void FArray::InsertUninitialized(int index, int count, int elementSize)
@@ -153,7 +174,9 @@ void FArray::InsertUninitialized(int index, int count, int elementSize)
 	guard(FArray::InsertUninitialized);
 
 	if (!count) return;
-	GrowArray(count, elementSize);
+
+	if (DataCount + count > MaxCount)
+		GrowArray(count, elementSize);
 
 	// move data
 	if (index != DataCount)
@@ -246,7 +269,8 @@ void FArray::RawCopy(const FArray &Src, int elementSize)
 
 void* FArray::GetItem(int index, int elementSize) const
 {
-	if (!IsValidIndex(index)) appError("TArray: index %d is out of range (%d)", index, DataCount);
+	if (!IsValidIndex(index))
+		appError("TArray: index %d is out of range (%d)", index, DataCount);
 	return OffsetPointer(DataPtr, index * elementSize);
 }
 
@@ -357,13 +381,13 @@ char* FString::Detach()
 	return RetData;
 }
 
-bool FString::StartsWith(const char* Text)
+bool FString::StartsWith(const char* Text) const
 {
 	if (!Text || !Text[0] || IsEmpty()) return false;
 	return (strncmp(Data.GetData(), Text, strlen(Text)) == 0);
 }
 
-bool FString::EndsWith(const char* Text)
+bool FString::EndsWith(const char* Text) const
 {
 	if (!Text || !Text[0] || IsEmpty()) return false;
 	int len = strlen(Text);
@@ -455,7 +479,7 @@ void FString::TrimStartAndEndInline()
 	FName (string) pool
 -----------------------------------------------------------------------------*/
 
-#define STRING_HASH_SIZE		32768
+#define STRING_HASH_SIZE		(65536*4)		// 1Mb of 32-bit pointers
 
 struct CStringPoolEntry
 {
@@ -470,57 +494,54 @@ static CMemoryChain* StringPool;
 const char* appStrdupPool(const char* str)
 {
 	int len = strlen(str);
-	int hash = 0;
+#if 0
+	unsigned int hash = 0;
 	for (int i = 0; i < len; i++)
 	{
 		char c = str[i];
-#if 0
-		hash = (hash + c) ^ 0xABCDEF;
-#else
-		hash = ROL16(hash, 5) - hash + ((c << 4) + c ^ 0x13F);	// some crazy hash function
-#endif
+		hash = ROL32(hash, 1) + c;
 	}
+#else
+	// The FNV Non-Cryptographic Hash Algorithm
+	// https://tools.ietf.org/html/draft-eastlake-fnv-16
+	// It produces much better has collision distribution and smaller
+	// peak collision chain lengths.
+	#define FNV32prime 0x01000193
+	#define FNV32basis 0x811C9DC5
+	unsigned int hash = FNV32basis;
+	for (const char* s = str, *e = str + len; s < e; s++)
+	{
+		hash = FNV32prime * (hash ^ *s);
+	}
+
+#endif
 	hash &= (STRING_HASH_SIZE - 1);
 
-#if 0
-	if (true)
+	// Find existing string in a pool
+	CStringPoolEntry** prevPoint = &StringHashTable[hash];
+	while (true)
 	{
-		// Compare "Length" and first 2 characters with single operation
-		uint32 cmp = len | (str[0] << 16) | (str[1] << 24);
-		for (const CStringPoolEntry* s = StringHashTable[hash]; s; s = s->HashNext)
+		CStringPoolEntry* current = *prevPoint;
+		// Keep items sorted by string length - it is almost free, but will
+		// allow faster rejection during search.
+		if (!current || current->Length > len) break;
+		if (current->Length == len && !memcmp(str, current->Str, len))
 		{
-			uint32 cmp2 = *(uint32*)&s->Length;
-			if (cmp == cmp2)
-			{
-				if (!memcmp(str, s->Str, len))
-				{
-					// found a string
-					return s->Str;
-				}
-			}
+			// Found a string
+			return current->Str;
 		}
-	}
-	else
-#endif
-	{
-		for (const CStringPoolEntry* s = StringHashTable[hash]; s; s = s->HashNext)
-		{
-			if (s->Length == len && !memcmp(str, s->Str, len))
-			{
-				// found a string
-				return s->Str;
-			}
-		}
+		prevPoint = &current->HashNext;
 	}
 
 	if (!StringPool) StringPool = new CMemoryChain();
 
-	// allocate new string from pool
+	// Allocate new string from pool
 	CStringPoolEntry* n = (CStringPoolEntry*)StringPool->Alloc(sizeof(CStringPoolEntry) + len);	// note: null byte is taken into account in CStringPoolEntry
-	n->HashNext = StringHashTable[hash];
-	StringHashTable[hash] = n;
 	n->Length = len;
 	memcpy(n->Str, str, len+1);
+	// Insert into the hash collision chain
+	n->HashNext = *prevPoint;
+	*prevPoint = n;
 
 	return n->Str;
 }
@@ -528,19 +549,32 @@ const char* appStrdupPool(const char* str)
 #if 0
 void PrintStringHashDistribution()
 {
-	int hashCounts[1024];
 	int totalCount = 0;
+	uint32 memoryUsed = sizeof(StringHashTable);
+	int hashCounts[1024];
+	int* bucketSizes = new int[STRING_HASH_SIZE];
 	memset(hashCounts, 0, sizeof(hashCounts));
+	memset(bucketSizes, 0, sizeof(bucketSizes));
+
+	// Collect statistics
 	for (int hash = 0; hash < STRING_HASH_SIZE; hash++)
 	{
 		int count = 0;
 		for (CStringPoolEntry* info = StringHashTable[hash]; info; info = info->HashNext)
+		{
 			count++;
+			memoryUsed += sizeof(CStringPoolEntry) + info->Length;
+		}
 		assert(count < ARRAY_COUNT(hashCounts));
 		hashCounts[count]++;
+		bucketSizes[hash] = count;
 		totalCount += count;
 	}
-	appPrintf("String hash distribution: collision count -> num chains\n");
+
+	// Print statistics
+	FILE* f = fopen("StringTableInfo.txt", "w");
+	fprintf(f, "%d strings, %.2f Mb used\n", totalCount, memoryUsed / (1024.0f * 1024.0f));
+	fprintf(f, "String hash distribution: collision count -> num chains\n");
 	int totalCount2 = 0;
 	for (int i = 0; i < ARRAY_COUNT(hashCounts); i++)
 	{
@@ -549,21 +583,45 @@ void PrintStringHashDistribution()
 		{
 			totalCount2 += count * i;
 			float percent = totalCount2 * 100.0f / totalCount;
-			appPrintf("%d -> %d [%.1f%%]\n", i, count, percent);
-		}
-	}
-	assert(totalCount == totalCount2);
-
-	// Store string table to a file
-	FILE* f = fopen("StringTable.txt", "w");
-	for (int hash = 0; hash < STRING_HASH_SIZE; hash++)
-	{
-		for (CStringPoolEntry* info = StringHashTable[hash]; info; info = info->HashNext)
-		{
-			fprintf(f, "%s\n", info->Str);
+			fprintf(f, "%d -> %d [%.1f%%]\n", i, count, percent);
 		}
 	}
 	fclose(f);
+	assert(totalCount == totalCount2);
+
+	// Store string table to a file
+	f = fopen("StringTable.txt", "w");
+	// Sort by bucket sizes
+	for (int i = ARRAY_COUNT(hashCounts) - 1; i > 0; i--)
+	{
+		if (hashCounts[i] == 0) continue; // no buckets of this size
+
+		for (int hash = 0; hash < STRING_HASH_SIZE; hash++)
+		{
+			if (bucketSizes[hash] != i) continue;
+			fprintf(f, "# bucket %d items\n", i);
+			TStaticArray<const CStringPoolEntry*, 1024> Entries;
+			for (CStringPoolEntry* info = StringHashTable[hash]; info; info = info->HashNext)
+			{
+				Entries.Add(info);
+			}
+			Entries.Sort([](const CStringPoolEntry* const& A, const CStringPoolEntry* const& B) -> int
+				{
+					int Diff = A->Length - B->Length;
+					if (Diff) return Diff; // note: already have items sorted by string length
+					return stricmp(A->Str, B->Str);
+				});
+			for (const CStringPoolEntry* info : Entries)
+			{
+				fprintf(f, "%s\n", info->Str);
+			}
+			fprintf(f, "\n");
+		}
+	}
+	fclose(f);
+
+	// Cleanup
+	delete[] bucketSizes;
 }
 #endif
 

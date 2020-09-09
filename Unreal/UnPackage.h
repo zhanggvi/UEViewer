@@ -26,7 +26,7 @@ struct FGenerationInfo
 	{
 		Ar << I.ExportCount << I.NameCount;
 #if UNREAL4
-		if (Ar.Game >= GAME_UE4_BASE && Ar.ArVer >= VER_UE4_REMOVE_NET_INDEX) return Ar;
+		if (Ar.Game >= GAME_UE4_BASE && Ar.ArVer >= 196 /*VER_UE4_REMOVE_NET_INDEX*/) return Ar;
 #endif
 #if UNREAL3
 		if (Ar.ArVer >= 322) // PACKAGE_V3
@@ -231,9 +231,11 @@ struct FObjectDepends
 class UnPackage : public FArchive
 {
 	DECLARE_ARCHIVE(UnPackage, FArchive);
+protected:
+	const char*				FilenameNoInfo;		// full name with path and extension
 public:
-	const char*				Filename;			// full name with path and extension
 	const char*				Name;				// short name without extension
+	const CGameFileInfo*	FileInfo;
 	FArchive				*Loader;
 
 	// package header
@@ -247,19 +249,31 @@ public:
 #endif
 
 protected:
-	UnPackage(const char *filename, FArchive *baseLoader = NULL, bool silent = false);
+	UnPackage(const char *filename, const CGameFileInfo* fileInfo = NULL, bool silent = false);
 	~UnPackage();
 
 public:
+	FString GetFilename() const
+	{
+		return FileInfo ? FileInfo->GetRelativeName() : FilenameNoInfo;
+	}
+
 	// Check if constructor has created a valid package
 	bool IsValid() const { return Summary.NameCount > 0; }
 
 	// Load package using short name (without path and extension) or full path name.
 	// When the package is already loaded, this function will simply return a pointer
 	// to previously loaded UnPackage.
-	static UnPackage *LoadPackage(const char *Name, bool silent = false);
+	static UnPackage* LoadPackage(const char* Name, bool silent = false);
+	// Load package using existing CGameFileInfo
+	static UnPackage* LoadPackage(const CGameFileInfo* File, bool silent = false);
 	// We've protected UnPackage's destructor, however it is possible to use UnloadPackage to destroy package.
 	static void UnloadPackage(UnPackage* package);
+
+	FORCEINLINE static void ReservePackageMap(int count)
+	{
+		PackageMap.Reserve(count);
+	}
 
 	// Create loader FArchive for package
 	static FArchive* CreateLoader(const char* filename, FArchive* baseLoader = NULL);
@@ -281,37 +295,37 @@ public:
 
 	const char* GetName(int index)
 	{
-		if (index < 0 || index >= Summary.NameCount)
-			appError("Package \"%s\": wrong name index %d", Filename, index);
+		if (unsigned(index) >= Summary.NameCount)
+			appError("Package \"%s\": wrong name index %d", *GetFilename(), index);
 		return NameTable[index];
 	}
 
 	FObjectImport& GetImport(int index)
 	{
-		if (index < 0 || index >= Summary.ImportCount)
-			appError("Package \"%s\": wrong import index %d", Filename, index);
+		if (unsigned(index) >= Summary.ImportCount)
+			appError("Package \"%s\": wrong import index %d", *GetFilename(), index);
 		return ImportTable[index];
 	}
 
 	const FObjectImport& GetImport(int index) const // duplicate for 'const' package
 	{
-		if (index < 0 || index >= Summary.ImportCount)
-			appError("Package \"%s\": wrong import index %d", Filename, index);
+		if (unsigned(index) >= Summary.ImportCount)
+			appError("Package \"%s\": wrong import index %d", *GetFilename(), index);
 		return ImportTable[index];
 	}
 
 	FObjectExport& GetExport(int index)
 	{
-		if (index < 0 || index >= Summary.ExportCount)
-			appError("Package \"%s\": wrong export index %d", Filename, index);
+		if (unsigned(index) >= Summary.ExportCount)
+			appError("Package \"%s\": wrong export index %d", *GetFilename(), index);
 		return ExportTable[index];
 	}
 
 	// "const" version of the above function
 	const FObjectExport& GetExport(int index) const
 	{
-		if (index < 0 || index >= Summary.ExportCount)
-			appError("Package \"%s\": wrong export index %d", Filename, index);
+		if (unsigned(index) >= Summary.ExportCount)
+			appError("Package \"%s\": wrong export index %d", *GetFilename(), index);
 		return ExportTable[index];
 	}
 
@@ -380,7 +394,7 @@ public:
 	{
 		Loader->SetStopper(Pos);
 	}
-	virtual int  GetStopper() const
+	virtual int GetStopper() const
 	{
 		return Loader->GetStopper();
 	}
@@ -403,6 +417,10 @@ public:
 
 private:
 	void LoadNameTable();
+	void LoadNameTable3();
+	void LoadNameTable4();
+	bool VerifyName(FString& nameStr, int nameIndex);
+
 	void LoadImportTable();
 	void LoadExportTable();
 
