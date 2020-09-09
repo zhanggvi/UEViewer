@@ -414,6 +414,10 @@ const GameInfo GListOfGames[] = {
 #	if SEAOFTHIEVES
 		G("Sea of Thieves", sot, GAME_SeaOfThieves),
 #	endif
+#	if PUBG
+		G("PUBG PC v6.0.1+", pubg, GAME_PUBG),
+#	endif
+
 #endif // UNREAL4
 
 	// end marker
