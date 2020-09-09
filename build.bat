@@ -3,11 +3,13 @@
 set CurrDir=%~dp0
 set CopyDir=%1
 
-set PATH=%PATH%;D:\git\BuildTools\bin
+set BuildToolsDir=D:\git\gildor2\BuildTools\bin
+
+set PATH=%PATH%;%BuildToolsDir%
 
 
 rem build.
-bash build.sh --64
+%BuildToolsDir%\bash.exe build.sh --64
 
 
 rem copy and auto run.
